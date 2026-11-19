@@ -6,6 +6,8 @@ interface Props {
   secureAvailable: boolean
   /** 点击连接项，打开终端 */
   onConnect(vo: ConnectionVO): void
+  /** 打开 SFTP 文件管理 */
+  onOpenSftp(vo: ConnectionVO): void
   /** 打开新建表单 */
   onCreate(): void
   /** 打开编辑表单 */
@@ -23,6 +25,7 @@ function ConnectionList({
   connections,
   secureAvailable,
   onConnect,
+  onOpenSftp,
   onCreate,
   onEdit,
   onRemove
@@ -50,6 +53,9 @@ function ConnectionList({
               </span>
             </button>
             <div className="conn-actions">
+              <button className="icon-btn" title="SFTP 文件管理" onClick={() => onOpenSftp(vo)}>
+                ⇅
+              </button>
               <button className="icon-btn" title="编辑" onClick={() => onEdit(vo)}>
                 ✎
               </button>

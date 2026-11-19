@@ -2,16 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConnectionVO, SaveConnectionDTO } from '@shared/types'
 import ConnectionList from './components/ConnectionList'
 import ConnectionForm from './components/ConnectionForm'
-import TerminalTabs from './components/TerminalTabs'
+import WorkspaceTabs from './components/WorkspaceTabs'
 import { toMessage } from './utils'
-import type { TerminalTab } from './types'
+import type { AppTab, TabSource, TerminalTab } from './types'
 
 /** 表单状态：新增、编辑或关闭 */
 type EditorState = { mode: 'new' } | { mode: 'edit'; vo: ConnectionVO } | null
 
 /** 会话区状态：标签与激活项合并维护，避免出现激活项已被关闭的中间态 */
 interface SessionState {
-  tabs: TerminalTab[]
+  tabs: AppTab[]
   activeId: string | null
 }
 
@@ -19,7 +19,7 @@ interface SessionState {
 const EMPTY_SESSION: SessionState = { tabs: [], activeId: null }
 
 /**
- * 应用根组件，负责连接列表、终端标签与表单三者的状态编排。
+ * 应用根组件，负责连接列表、工作区标签与表单三者的状态编排。
  * @returns 应用界面元素
  */
 function App(): React.JSX.Element {
@@ -58,7 +58,7 @@ function App(): React.JSX.Element {
       setSession((prev) => ({
         ...prev,
         tabs: prev.tabs.map((tab) =>
-          tab.sessionId === sessionId ? { ...tab, exitReason: reason } : tab
+          tab.kind === 'terminal' && tab.id === sessionId ? { ...tab, exitReason: reason } : tab
         )
       }))
     })
@@ -93,49 +93,77 @@ function App(): React.JSX.Element {
    * @param source 连接来源，已保存连接或临时连接
    * @param title 标签标题，缺省时用主进程返回的标题
    */
-  const openTerminal = useCallback(
-    async (source: TerminalTab['source'], title?: string): Promise<void> => {
-      try {
-        const vo = await window.api.terminal.open({
-          connectionId: source.connectionId,
-          inline: source.inline,
-          // 先用默认尺寸建立会话，终端挂载后由 FitAddon 立即校准真实行列数
-          cols: 80,
-          rows: 24
-        })
-        setSession((prev) => ({
-          tabs: [...prev.tabs, { sessionId: vo.sessionId, title: title || vo.title, source }],
-          activeId: vo.sessionId
-        }))
-      } catch (err) {
-        setToast(toMessage(err))
-      }
-    },
-    []
-  )
-
-  /**
-   * 关闭标签及其会话。
-   * @param sessionId 会话 id
-   */
-  const closeTab = useCallback((sessionId: string): void => {
-    window.api.terminal.close(sessionId)
-    setSession((prev) => {
-      const tabs = prev.tabs.filter((tab) => tab.sessionId !== sessionId)
-      // 关闭的正是当前标签时，回退到最后一个剩余标签
-      const activeId =
-        prev.activeId === sessionId ? (tabs[tabs.length - 1]?.sessionId ?? null) : prev.activeId
-      return { tabs, activeId }
-    })
+  const openTerminal = useCallback(async (source: TabSource, title?: string): Promise<void> => {
+    try {
+      const vo = await window.api.terminal.open({
+        connectionId: source.connectionId,
+        inline: source.inline,
+        // 先用默认尺寸建立会话，终端挂载后由 FitAddon 立即校准真实行列数
+        cols: 80,
+        rows: 24
+      })
+      setSession((prev) => ({
+        tabs: [
+          ...prev.tabs,
+          { kind: 'terminal', id: vo.sessionId, title: title || vo.title, source }
+        ],
+        activeId: vo.sessionId
+      }))
+    } catch (err) {
+      setToast(toMessage(err))
+    }
   }, [])
 
   /**
-   * 用原配置重建会话。
-   * @param tab 待重连的标签
+   * 打开一个 SFTP 标签，与终端共享同一条底层 SSH 连接。
+   * @param source 连接来源，已保存连接或临时连接
+   * @param title 标签标题，缺省时用主进程返回的标题
+   */
+  const openSftp = useCallback(async (source: TabSource, title?: string): Promise<void> => {
+    try {
+      const vo = await window.api.sftp.open({
+        connectionId: source.connectionId,
+        inline: source.inline
+      })
+      setSession((prev) => ({
+        tabs: [
+          ...prev.tabs,
+          { kind: 'sftp', id: vo.sftpId, title: title || vo.title, source, home: vo.home }
+        ],
+        activeId: vo.sftpId
+      }))
+    } catch (err) {
+      setToast(toMessage(err))
+    }
+  }, [])
+
+  /**
+   * 关闭标签及其会话，按标签种类调用对应的关闭通道。
+   * @param id 会话 id
+   */
+  const closeTab = useCallback(
+    (id: string): void => {
+      const target = session.tabs.find((tab) => tab.id === id)
+      if (target?.kind === 'sftp') window.api.sftp.close(id)
+      else if (target?.kind === 'terminal') window.api.terminal.close(id)
+
+      setSession((prev) => {
+        const tabs = prev.tabs.filter((tab) => tab.id !== id)
+        // 关闭的正是当前标签时，回退到最后一个剩余标签
+        const activeId = prev.activeId === id ? (tabs[tabs.length - 1]?.id ?? null) : prev.activeId
+        return { tabs, activeId }
+      })
+    },
+    [session.tabs]
+  )
+
+  /**
+   * 用原配置重建终端会话。
+   * @param tab 待重连的终端标签
    */
   const reconnect = useCallback(
     (tab: TerminalTab): void => {
-      closeTab(tab.sessionId)
+      closeTab(tab.id)
       openTerminal(tab.source, tab.title)
     },
     [closeTab, openTerminal]
@@ -178,16 +206,17 @@ function App(): React.JSX.Element {
         connections={connections}
         secureAvailable={secureAvailable}
         onConnect={(vo) => openTerminal({ connectionId: vo.id }, vo.name)}
+        onOpenSftp={(vo) => openSftp({ connectionId: vo.id }, vo.name)}
         onCreate={() => setEditor({ mode: 'new' })}
         onEdit={(vo) => setEditor({ mode: 'edit', vo })}
         onRemove={removeConnection}
       />
 
       <main className="workspace">
-        <TerminalTabs
+        <WorkspaceTabs
           tabs={session.tabs}
           activeId={session.activeId}
-          onActivate={(sessionId) => setSession((prev) => ({ ...prev, activeId: sessionId }))}
+          onActivate={(id) => setSession((prev) => ({ ...prev, activeId: id }))}
           onClose={closeTab}
           onReconnect={reconnect}
           registerWriter={registerWriter}

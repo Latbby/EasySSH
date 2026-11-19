@@ -57,6 +57,39 @@ export interface OpenTerminalVO {
   title: string
 }
 
+/** SFTP 目录项类型 */
+export type SftpEntryType = 'file' | 'directory' | 'symlink'
+
+/** SFTP 目录项出参 */
+export interface SftpEntryVO {
+  name: string
+  /** 绝对路径 */
+  path: string
+  type: SftpEntryType
+  /** 字节数，目录恒为 0 */
+  size: number
+  /** 修改时间戳（毫秒） */
+  mtime: number
+}
+
+/** 打开 SFTP 会话入参 */
+export interface OpenSftpDTO {
+  /** 已保存连接 id，与 inline 二选一 */
+  connectionId?: string
+  /** 临时连接配置，不落盘 */
+  inline?: SaveConnectionDTO
+}
+
+/** 打开 SFTP 会话出参 */
+export interface OpenSftpVO {
+  /** SFTP 会话 id，后续文件操作都以此为路由键 */
+  sftpId: string
+  /** 标签标题 */
+  title: string
+  /** 登录后的初始目录，作为面板起始路径 */
+  home: string
+}
+
 /** IPC 通道名常量，主进程与 preload 共用，避免字符串拼写漂移 */
 export const IPC = {
   connList: 'conn:list',
@@ -69,7 +102,15 @@ export const IPC = {
   termResize: 'term:resize',
   termClose: 'term:close',
   termData: 'term:data',
-  termExit: 'term:exit'
+  termExit: 'term:exit',
+  sftpOpen: 'sftp:open',
+  sftpClose: 'sftp:close',
+  sftpList: 'sftp:list',
+  sftpUpload: 'sftp:upload',
+  sftpDownload: 'sftp:download',
+  sftpMkdir: 'sftp:mkdir',
+  sftpRemove: 'sftp:remove',
+  sftpRename: 'sftp:rename'
 } as const
 
 /** 暴露给渲染进程的 API 契约，由 preload 实现 */
@@ -104,5 +145,24 @@ export interface SshClientApi {
     onData(listener: (sessionId: string, data: Uint8Array) => void): () => void
     /** 订阅会话结束事件，返回取消订阅函数 */
     onExit(listener: (sessionId: string, reason: string) => void): () => void
+  }
+  /** SFTP 文件操作，与终端复用同一条底层 SSH 连接 */
+  sftp: {
+    /** 打开 SFTP 会话 */
+    open(dto: OpenSftpDTO): Promise<OpenSftpVO>
+    /** 关闭 SFTP 会话 */
+    close(sftpId: string): void
+    /** 列出远程目录内容 */
+    list(sftpId: string, path: string): Promise<SftpEntryVO[]>
+    /** 弹出文件选择框上传到指定远程目录，返回上传成功的文件名；用户取消时为空数组 */
+    upload(sftpId: string, remoteDir: string): Promise<string[]>
+    /** 弹出保存框下载远程文件，返回是否完成 */
+    download(sftpId: string, remotePath: string): Promise<boolean>
+    /** 新建远程目录 */
+    mkdir(sftpId: string, path: string): Promise<void>
+    /** 删除远程文件或目录，类型由主进程判断 */
+    remove(sftpId: string, path: string): Promise<void>
+    /** 重命名或移动远程路径 */
+    rename(sftpId: string, oldPath: string, newPath: string): Promise<void>
   }
 }

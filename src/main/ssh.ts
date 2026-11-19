@@ -1,5 +1,6 @@
 import { app } from 'electron'
 import { Client, type ClientChannel } from 'ssh2'
+import { EventEmitter } from 'events'
 import { createHash, randomUUID } from 'crypto'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -7,7 +8,7 @@ import type { OpenTerminalVO } from '@shared/types'
 
 /** 解析完成的 SSH 连接参数，认证凭据已在主进程内解密 */
 export interface ResolvedSshConfig {
-  /** 底层连接复用键，同键的多个终端标签共享一条 SSH 连接 */
+  /** 底层连接复用键，同键的多个终端标签与 SFTP 会话共享一条 SSH 连接 */
   connectionId: string
   /** 标签展示名 */
   title: string
@@ -22,7 +23,7 @@ export interface ResolvedSshConfig {
 /** 复用中的底层 SSH 连接 */
 interface PooledConnection {
   client: Client
-  /** 引用计数：每个 shell 或 sftp 打开时加一，全部释放后关闭连接 */
+  /** 引用计数：每个 shell 或 sftp 通道打开时加一，全部释放后关闭连接 */
   refs: number
 }
 
@@ -32,6 +33,9 @@ interface Session {
   connectionId: string
   stream: ClientChannel
 }
+
+/** 连接池的底层连接断开事件名，终端与 SFTP 各自监听并回收自己的通道 */
+export const POOL_CLOSED = 'closed'
 
 /** 已知主机指纹表，key 为 host:port，全部连接共用一份 */
 let knownHosts: Record<string, string> | null = null
@@ -88,34 +92,25 @@ function verifyHostKey(host: string, port: number, key: Buffer): boolean {
 }
 
 /**
- * SSH 会话管理器。
- * 负责底层连接复用、终端会话生命周期，以及把远端数据回调给渲染进程。
+ * SSH 连接池。
+ * 负责建立与复用底层连接、维护引用计数、校验主机指纹。
+ * 连接异常断开时通过 {@link POOL_CLOSED} 事件通知各使用者回收自己的通道，
+ * 这样终端会话与 SFTP 会话可以各自独立管理，却共享同一条 TCP 连接。
  */
-export class SshSessionManager {
+export class SshConnectionPool extends EventEmitter {
   /** connectionId 到复用中的底层连接 */
   private pool = new Map<string, PooledConnection>()
-  /** sessionId 到终端会话 */
-  private sessions = new Map<string, Session>()
-
-  /**
-   * @param onData 远端输出回调，data 为原始字节，交由渲染进程的 xterm 完成 UTF-8 解码
-   * @param onExit 会话结束回调，reason 为结束原因
-   */
-  constructor(
-    private readonly onData: (sessionId: string, data: Uint8Array) => void,
-    private readonly onExit: (sessionId: string, reason: string) => void
-  ) {}
 
   /**
    * 获取可用的底层连接，已存在则复用并递增引用计数。
    * @param config 解析后的连接参数
-   * @returns 连接池对象
+   * @returns 已就绪的 ssh2 客户端
    */
-  private async acquire(config: ResolvedSshConfig): Promise<PooledConnection> {
+  async acquire(config: ResolvedSshConfig): Promise<Client> {
     const existing = this.pool.get(config.connectionId)
     if (existing) {
       existing.refs += 1
-      return existing
+      return existing.client
     }
 
     const client = new Client()
@@ -148,30 +143,61 @@ export class SshSessionManager {
     const pooled: PooledConnection = { client, refs: 1 }
     this.pool.set(config.connectionId, pooled)
 
-    // 建连后仍需持续监听：连接异常断开时要回收该连接下的全部会话
+    // 建连后仍需持续监听：连接异常断开时要通知所有使用者回收通道
     client.on('error', () => undefined)
     client.on('close', () => {
       this.pool.delete(config.connectionId)
-      const affected = [...this.sessions.values()].filter(
-        (item) => item.connectionId === config.connectionId
-      )
-      affected.forEach((item) => this.close(item.id, '连接已断开'))
+      this.emit(POOL_CLOSED, config.connectionId)
     })
 
-    return pooled
+    return client
   }
 
   /**
    * 释放一次引用计数，归零时关闭底层连接。
    * @param connectionId 底层连接复用键
    */
-  private release(connectionId: string): void {
+  release(connectionId: string): void {
     const pooled = this.pool.get(connectionId)
     if (!pooled) return
     pooled.refs -= 1
     if (pooled.refs > 0) return
     this.pool.delete(connectionId)
     pooled.client.end()
+  }
+
+  /** 应用退出前关闭全部连接 */
+  dispose(): void {
+    this.pool.forEach((pooled) => pooled.client.end())
+    this.pool.clear()
+  }
+}
+
+/**
+ * 终端会话管理器。
+ * 只负责 shell 通道的生命周期，底层连接由连接池统一持有。
+ */
+export class SshSessionManager {
+  /** sessionId 到终端会话 */
+  private sessions = new Map<string, Session>()
+
+  /**
+   * @param pool 共享的连接池
+   * @param onData 远端输出回调，data 为原始字节，交由渲染进程的 xterm 完成 UTF-8 解码
+   * @param onExit 会话结束回调，reason 为结束原因
+   */
+  constructor(
+    private readonly pool: SshConnectionPool,
+    private readonly onData: (sessionId: string, data: Uint8Array) => void,
+    private readonly onExit: (sessionId: string, reason: string) => void
+  ) {
+    // 底层连接断开时，回收该连接下的全部终端会话
+    pool.on(POOL_CLOSED, (connectionId: string) => {
+      const affected = [...this.sessions.values()].filter(
+        (item) => item.connectionId === connectionId
+      )
+      affected.forEach((item) => this.close(item.id, '连接已断开'))
+    })
   }
 
   /**
@@ -182,18 +208,18 @@ export class SshSessionManager {
    * @returns 会话 id 与标签标题
    */
   async open(config: ResolvedSshConfig, cols: number, rows: number): Promise<OpenTerminalVO> {
-    const pooled = await this.acquire(config)
+    const client = await this.pool.acquire(config)
     const sessionId = randomUUID()
     let stream: ClientChannel
     try {
       stream = await new Promise<ClientChannel>((resolve, reject) => {
-        pooled.client.shell({ term: 'xterm-256color', cols, rows }, (err, channel) =>
+        client.shell({ term: 'xterm-256color', cols, rows }, (err, channel) =>
           err ? reject(err) : resolve(channel)
         )
       })
     } catch (err) {
       // 开 shell 失败要把引用计数还回去，否则底层连接永远不会释放
-      this.release(config.connectionId)
+      this.pool.release(config.connectionId)
       throw err
     }
 
@@ -221,7 +247,7 @@ export class SshSessionManager {
     } catch {
       // 流可能已由远端关闭，忽略
     }
-    this.release(session.connectionId)
+    this.pool.release(session.connectionId)
     this.onExit(sessionId, reason)
   }
 
@@ -242,12 +268,5 @@ export class SshSessionManager {
    */
   resize(sessionId: string, cols: number, rows: number): void {
     this.sessions.get(sessionId)?.stream.setWindow(rows, cols, 0, 0)
-  }
-
-  /** 应用退出前关闭全部连接 */
-  dispose(): void {
-    this.pool.forEach((pooled) => pooled.client.end())
-    this.pool.clear()
-    this.sessions.clear()
   }
 }

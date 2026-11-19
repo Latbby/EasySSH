@@ -2,16 +2,15 @@ import { app, shell, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { registerIpcHandlers } from './ipc'
-import type { SshSessionManager } from './ssh'
+import { registerIpcHandlers, type IpcHandle } from './ipc'
 
 // 允许通过环境变量覆盖数据目录，便于自动化测试与便携部署，必须在 app ready 之前设置
 if (process.env.SSH_CLIENT_USER_DATA) {
   app.setPath('userData', process.env.SSH_CLIENT_USER_DATA)
 }
 
-/** SSH 会话管理器，应用退出时需要释放全部连接 */
-let sessionManager: SshSessionManager | undefined
+/** IPC 句柄，应用退出时用它释放全部 SSH 连接 */
+let ipcHandle: IpcHandle | undefined
 
 function createWindow(): void {
   // Create the browser window.
@@ -61,8 +60,8 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // 注册连接管理与终端相关 IPC，返回的会话管理器在退出时统一释放
-  sessionManager = registerIpcHandlers()
+  // 注册连接管理、终端与 SFTP 相关 IPC，退出时统一释放底层连接
+  ipcHandle = registerIpcHandlers()
 
   createWindow()
 
@@ -84,5 +83,5 @@ app.on('window-all-closed', () => {
 
 // 退出前关闭所有 SSH 连接，避免远端残留会话
 app.on('before-quit', () => {
-  sessionManager?.dispose()
+  ipcHandle?.dispose()
 })

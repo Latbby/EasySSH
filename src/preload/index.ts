@@ -33,6 +33,17 @@ const api: SshClientApi = {
       ipcRenderer.on(IPC.termExit, handler)
       return () => ipcRenderer.off(IPC.termExit, handler)
     }
+  },
+  sftp: {
+    open: (dto) => ipcRenderer.invoke(IPC.sftpOpen, dto),
+    close: (sftpId) => ipcRenderer.send(IPC.sftpClose, sftpId),
+    list: (sftpId, path) => ipcRenderer.invoke(IPC.sftpList, sftpId, path),
+    upload: (sftpId, remoteDir) => ipcRenderer.invoke(IPC.sftpUpload, sftpId, remoteDir),
+    download: (sftpId, remotePath) => ipcRenderer.invoke(IPC.sftpDownload, sftpId, remotePath),
+    mkdir: (sftpId, path) => ipcRenderer.invoke(IPC.sftpMkdir, sftpId, path),
+    remove: (sftpId, path) => ipcRenderer.invoke(IPC.sftpRemove, sftpId, path),
+    rename: (sftpId, oldPath, newPath) =>
+      ipcRenderer.invoke(IPC.sftpRename, sftpId, oldPath, newPath)
   }
 }
 

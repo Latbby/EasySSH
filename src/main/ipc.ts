@@ -3,9 +3,12 @@ import { readFileSync } from 'fs'
 import {
   IPC,
   type ConnectionVO,
+  type OpenSftpDTO,
+  type OpenSftpVO,
   type OpenTerminalDTO,
   type OpenTerminalVO,
-  type SaveConnectionDTO
+  type SaveConnectionDTO,
+  type SftpEntryVO
 } from '@shared/types'
 import {
   getConnection,
@@ -15,7 +18,17 @@ import {
   resolveCredential,
   saveConnection
 } from './store'
-import { SshSessionManager, type ResolvedSshConfig } from './ssh'
+import { SshConnectionPool, SshSessionManager, type ResolvedSshConfig } from './ssh'
+import { SftpManager } from './sftp'
+
+/** 打开终端或 SFTP 的公共入参：已保存连接与临时连接二选一 */
+type OpenTargetDTO = Pick<OpenTerminalDTO, 'connectionId' | 'inline'>
+
+/** IPC 注册结果，应用退出时用来释放连接 */
+export interface IpcHandle {
+  /** 关闭全部底层 SSH 连接 */
+  dispose(): void
+}
 
 /**
  * 向所有渲染窗口广播事件，目前是单窗口，多窗口时天然可用。
@@ -42,11 +55,11 @@ function readPrivateKey(path?: string): Buffer | undefined {
 }
 
 /**
- * 把打开终端入参解析为 SSH 配置，凭据在主进程内解密后使用，不回流到渲染进程。
- * @param dto 打开终端入参，支持已保存连接或一次性临时连接
+ * 把打开通道的入参解析为 SSH 配置，凭据在主进程内解密后使用，不回流到渲染进程。
+ * @param dto 打开入参，支持已保存连接或一次性临时连接
  * @returns 解析后的连接参数
  */
-function resolveConfig(dto: OpenTerminalDTO): ResolvedSshConfig {
+function resolveConfig(dto: OpenTargetDTO): ResolvedSshConfig {
   if (dto.connectionId) {
     const vo = getConnection(dto.connectionId)
     if (!vo) throw new Error('连接配置不存在，可能已被删除')
@@ -80,13 +93,17 @@ function resolveConfig(dto: OpenTerminalDTO): ResolvedSshConfig {
 
 /**
  * 注册全部 IPC 处理器。
- * @returns SSH 会话管理器实例，供应用退出时统一释放连接
+ * @returns 句柄，应用退出时调用其 dispose 释放连接
  */
-export function registerIpcHandlers(): SshSessionManager {
-  const manager = new SshSessionManager(
+export function registerIpcHandlers(): IpcHandle {
+  // 终端与 SFTP 共用同一个连接池，因此同一目标的文件传输不会额外握手
+  const pool = new SshConnectionPool()
+  const terminal = new SshSessionManager(
+    pool,
     (sessionId, data) => broadcast(IPC.termData, sessionId, data),
     (sessionId, reason) => broadcast(IPC.termExit, sessionId, reason)
   )
+  const sftp = new SftpManager(pool)
 
   ipcMain.handle(IPC.connList, (): ConnectionVO[] => listConnections())
   ipcMain.handle(IPC.connSave, (_event, dto: SaveConnectionDTO): ConnectionVO =>
@@ -108,15 +125,40 @@ export function registerIpcHandlers(): SshSessionManager {
   })
 
   ipcMain.handle(IPC.termOpen, (_event, dto: OpenTerminalDTO): Promise<OpenTerminalVO> =>
-    manager.open(resolveConfig(dto), dto.cols, dto.rows)
+    terminal.open(resolveConfig(dto), dto.cols, dto.rows)
   )
   ipcMain.on(IPC.termWrite, (_event, sessionId: string, data: string) =>
-    manager.write(sessionId, data)
+    terminal.write(sessionId, data)
   )
   ipcMain.on(IPC.termResize, (_event, sessionId: string, cols: number, rows: number) =>
-    manager.resize(sessionId, cols, rows)
+    terminal.resize(sessionId, cols, rows)
   )
-  ipcMain.on(IPC.termClose, (_event, sessionId: string) => manager.close(sessionId, '会话已关闭'))
+  ipcMain.on(IPC.termClose, (_event, sessionId: string) => terminal.close(sessionId, '会话已关闭'))
 
-  return manager
+  ipcMain.handle(IPC.sftpOpen, (_event, dto: OpenSftpDTO): Promise<OpenSftpVO> =>
+    sftp.open(resolveConfig(dto))
+  )
+  ipcMain.handle(IPC.sftpList, (_event, sftpId: string, path: string): Promise<SftpEntryVO[]> =>
+    sftp.list(sftpId, path)
+  )
+  ipcMain.handle(IPC.sftpUpload, (_event, sftpId: string, remoteDir: string): Promise<string[]> =>
+    sftp.upload(sftpId, remoteDir)
+  )
+  ipcMain.handle(IPC.sftpDownload, (_event, sftpId: string, remotePath: string): Promise<boolean> =>
+    sftp.download(sftpId, remotePath)
+  )
+  ipcMain.handle(IPC.sftpMkdir, (_event, sftpId: string, path: string): Promise<void> =>
+    sftp.mkdir(sftpId, path)
+  )
+  ipcMain.handle(IPC.sftpRemove, (_event, sftpId: string, path: string): Promise<void> =>
+    sftp.remove(sftpId, path)
+  )
+  ipcMain.handle(
+    IPC.sftpRename,
+    (_event, sftpId: string, oldPath: string, newPath: string): Promise<void> =>
+      sftp.rename(sftpId, oldPath, newPath)
+  )
+  ipcMain.on(IPC.sftpClose, (_event, sftpId: string) => sftp.close(sftpId))
+
+  return { dispose: () => pool.dispose() }
 }
