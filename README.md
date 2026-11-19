@@ -107,3 +107,29 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
 
 本机开发环境若设置了 `ELECTRON_RUN_AS_NODE=1`，`electron.exe` 会退化成纯 Node 运行、
 无法启动图形界面，需要在该变量未设置的环境下启动应用或运行 `verify:e2e`。
+
+
+## 运行环境要求（重要）
+
+打包产物是**未签名**的 Electron 应用。在受企业安全策略管控的机器上（例如安装了深信服
+SSL VPN 客户端、启用了要求"微软签名级别"的代码完整性策略），未签名程序可能被**静默阻止**：
+双击没有任何反应，且事件日志与崩溃转储里都查不到记录，极难排查。
+
+判断方法：
+
+- 同一台机器上**已签名**的 Electron 应用（语雀、VS Code 等）能正常运行，而本应用双击无反应；
+- `%LOCALAPPDATA%\CrashDumps` 里没有对应的 `.dmp`，事件日志"应用程序"里也没有 Application Error；
+- `Get-AuthenticodeSignature` 显示本应用为 `NotSigned`，而能运行的应用为 `Valid`。
+
+解决方式（任选其一）：
+
+1. 在不受管控的机器上运行；
+2. 为应用申请代码签名证书后再分发（electron-builder 配置 `win.certificateFile` 等签名参数）；
+3. 请 IT 将该程序加入白名单。
+
+可用的排查工具（随包分发在应用目录下）：
+
+- `run-debug.bat`：双击即可看到启动日志与退出码；
+- `run-compat.bat`：带 `--no-sandbox --disable-gpu` 启动，用于排除显卡与沙箱因素。
+
+主进程会把启动全过程写入 `%TEMP%\ssh-client-startup.log`，包括未捕获异常与渲染进程加载失败。
