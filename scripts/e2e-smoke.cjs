@@ -172,17 +172,22 @@ async function main() {
   const server = await startTestServer()
   console.log(`[信息] 测试 SSH 服务已启动 127.0.0.1:${SSH_PORT}`)
 
-  const electronPath = require('electron')
-  console.log(`[信息] 启动 Electron：${electronPath}`)
+  // 优先用打包产物验证：它最接近用户双击运行的真实形态
+  const packagedExe = path.join(PROJECT_ROOT, 'dist', 'win-unpacked', 'ssh-client.exe')
+  const usePackaged = fs.existsSync(packagedExe)
+  const command = usePackaged ? packagedExe : require('electron')
+  const args = usePackaged
+    ? [`--remote-debugging-port=${CDP_PORT}`]
+    : ['.', `--remote-debugging-port=${CDP_PORT}`]
+  console.log(`[信息] 启动${usePackaged ? '打包产物' : '开发态 Electron'}：${command}`)
   console.log(`[信息] 临时 userData：${USER_DATA_DIR}`)
 
   // 输出重定向到文件而非管道，便于排查启动失败
   const logFd = fs.openSync(LOG_FILE, 'w')
   const env = { ...process.env, SSH_CLIENT_USER_DATA: USER_DATA_DIR }
-  // 本环境默认注入 ELECTRON_RUN_AS_NODE=1，会让 electron.exe 退化成纯 Node 运行，必须剔除
+  // 本环境默认注入 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node 运行，必须剔除
   delete env.ELECTRON_RUN_AS_NODE
-  // 应用路径必须排在开关之前，避免开关被参数解析器当作未知选项
-  const child = spawn(electronPath, ['.', `--remote-debugging-port=${CDP_PORT}`], {
+  const child = spawn(command, args, {
     cwd: PROJECT_ROOT,
     stdio: ['ignore', logFd, logFd],
     env
