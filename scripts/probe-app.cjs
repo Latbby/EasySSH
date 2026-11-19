@@ -14,6 +14,8 @@ const path = require('path')
 
 const target = process.argv[2] || path.resolve(__dirname, '../dist/win-unpacked/ssh-client.exe')
 const lookMs = Number(process.argv[3] || 10000)
+/** 目标之后的参数原样传给被测程序，例如 electron.exe 需要把应用目录作为第一个参数 */
+const extraArgs = process.argv.slice(4)
 const logPath = path.resolve(__dirname, '../probe-app.log')
 
 if (!fs.existsSync(target)) {
@@ -34,7 +36,7 @@ console.log(`[探测] 目标：${target}`)
 console.log(`[探测] 观察时长：${lookMs} ms`)
 console.log(`[探测] userData：${userDataDir}`)
 
-const child = spawn(target, [], { stdio: ['ignore', logFd, logFd], env })
+const child = spawn(target, extraArgs, { stdio: ['ignore', logFd, logFd], env })
 
 let settled = false
 
