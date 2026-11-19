@@ -80,6 +80,21 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
   多字节字符，避免中文乱码。
 - **标签切换用显隐而非卸载**：终端实例常驻，避免重建导致的输出错位与历史丢失。
 
+## Windows 分发
+
+`npm run build:win` 产出：
+
+- `dist/win-unpacked/` —— 免安装目录版，直接运行其中的 `ssh-client.exe`（推荐）
+- `dist/ssh-client-<版本>-win.zip` —— 上述目录的压缩包
+
+**刻意不使用 NSIS 安装包与 portable 单文件版**：
+
+- NSIS 安装包在构建时需要实际运行一次生成的 exe 来提取卸载器，受限环境下构建即失败；
+- portable 版启动时要先把整个应用自解压到 `%TEMP%` 再执行，这类行为容易被安全软件拦截，
+  典型的报错是 `NSIS Error: Error writing temporary file`（文件本身并未损坏）。
+
+两者都不如目录版可靠。确实需要正式安装包时，在普通机器上把 `win.target` 换回 `nsis` 重新打包。
+
 ## 待办
 
 - 端口转发 / 隧道管理
