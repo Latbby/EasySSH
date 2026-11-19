@@ -1,4 +1,4 @@
-appId: com.electron.app
+appId: com.sshclient.app
 productName: ssh-client
 directories:
   buildResources: build
@@ -13,6 +13,14 @@ asarUnpack:
   - resources/**
 win:
   executableName: ssh-client
+  # portable 免安装单文件 + zip 免安装目录版。
+  # 未使用 nsis 安装包：其构建过程需要实际运行一次生成的 exe 来提取卸载器，
+  # 在禁止执行新生成程序的环境下会失败；在普通机器上可自行换回 nsis。
+  target:
+    - portable
+    - zip
+portable:
+  artifactName: ${name}-${version}-portable.${ext}
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
@@ -38,6 +46,3 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates
