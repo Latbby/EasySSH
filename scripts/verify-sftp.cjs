@@ -251,6 +251,8 @@ function serveSftp(sftp) {
     const full = normalize(target)
     const node = memfs.get(full)
     if (!node || node.type !== 'dir') return sftp.status(reqid, STATUS.NO_SUCH_FILE)
+    // 与真实服务端一致：非空目录拒绝删除，客户端据此给出「目录非空」的明确提示
+    if (childrenOf(full).length > 0) return sftp.status(reqid, STATUS.FAILURE)
     memfs.delete(full)
     sftp.status(reqid, STATUS.OK)
   })
@@ -330,9 +332,10 @@ const dialogBehavior = { openPaths: [], savePath: null }
  * 两个文件必须同名导入，因此分别输出为 ssh.js 与 sftp.js，保持 require('./ssh') 可解析。
  * @param {string} fileName 源文件名
  * @param {string} outName 输出文件名
+ * @param {string} sourceDir 源文件所在目录，默认为主进程目录
  */
-function compileTo(fileName, outName) {
-  const source = fs.readFileSync(path.resolve(__dirname, `../src/main/${fileName}`), 'utf8')
+function compileTo(fileName, outName, sourceDir = '../src/main') {
+  const source = fs.readFileSync(path.resolve(__dirname, `${sourceDir}/${fileName}`), 'utf8')
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -353,6 +356,12 @@ function loadModules() {
   fs.mkdirSync(BUILD_DIR, { recursive: true })
   compileTo('ssh.ts', 'ssh.js')
   compileTo('sftp.ts', 'sftp.js')
+  // 主进程模块用 @shared/errors 引用共享契约，单文件转译不会解析 tsconfig paths，这里一并编译并挂到 require 上
+  compileTo('errors.ts', 'shared-errors.js', '../src/shared')
+  // 主进程自己的错误翻译模块为可选文件，存在才编译
+  if (fs.existsSync(path.resolve(__dirname, '../src/main/errors.ts'))) {
+    compileTo('errors.ts', 'errors.js')
+  }
 
   const electronStub = {
     app: { getPath: () => DATA_DIR },
@@ -376,6 +385,9 @@ function loadModules() {
   const originalLoad = Module._load
   Module._load = function (request, ...rest) {
     if (request === 'electron') return electronStub
+    // tsconfig 里的 @shared/* 别名在真实构建中由 electron-vite 解析，单文件转译时需要手工指路
+    if (request === '@shared/errors') return require(path.join(BUILD_DIR, 'shared-errors.js'))
+    if (request === './errors') return require(path.join(BUILD_DIR, 'errors.js'))
     return originalLoad.call(this, request, ...rest)
   }
   try {
@@ -521,6 +533,84 @@ async function main() {
     errorMessage = err.message
   }
   assert(errorMessage.includes('SFTP 会话已关闭'), `会话失效后报错可读（${errorMessage}）`)
+
+  // 12. 拖拽上传入参 uploadPaths 与 fastPut 进度上报
+  const progressRecords = []
+  const progressManager = new sftpModule.SftpManager(pool, (vo) => progressRecords.push(vo))
+  const progressSession = await progressManager.open(config)
+  assert(typeof progressSession.sftpId === 'string', '带进度回调的 SFTP 会话打开成功')
+
+  const bigSource = path.join(DATA_DIR, 'big-upload.bin')
+  const bigContent = Buffer.alloc(300 * 1024)
+  for (let i = 0; i < bigContent.length; i += 1) bigContent[i] = i % 251
+  fs.writeFileSync(bigSource, bigContent)
+  const uploadedNames = await progressManager.uploadPaths({
+    sftpId: progressSession.sftpId,
+    remoteDir: HOME,
+    localPaths: [bigSource]
+  })
+  assert(
+    uploadedNames.length === 1 && uploadedNames[0] === 'big-upload.bin',
+    'uploadPaths 返回上传文件名（拖拽上传底层入口）'
+  )
+  const remoteBig = memfs.get(`${HOME}/big-upload.bin`)
+  assert(
+    remoteBig != null &&
+      remoteBig.content.length === bigContent.length &&
+      remoteBig.content.equals(bigContent),
+    'uploadPaths 上传内容与本地文件逐字节一致（300KB）'
+  )
+  const uploadSteps = progressRecords.filter((vo) => vo.direction === 'upload')
+  assert(
+    uploadSteps.some((vo) => !vo.done && vo.transferred > 0),
+    `上传过程上报了非零进度（共 ${uploadSteps.length} 条）`
+  )
+  const uploadDone = uploadSteps.find((vo) => vo.done)
+  assert(
+    uploadDone != null && uploadDone.name === 'big-upload.bin' && uploadDone.total === bigContent.length,
+    `上传完成事件带文件名与总大小（total=${uploadDone?.total}）`
+  )
+
+  // 13. 下载进度上报（fastGet step）
+  const bigDownloadTarget = path.join(DATA_DIR, 'big-download.bin')
+  dialogBehavior.savePath = bigDownloadTarget
+  const downloadDone = await progressManager.download(
+    progressSession.sftpId,
+    `${HOME}/big-upload.bin`
+  )
+  assert(downloadDone === true, '下载返回完成状态')
+  assert(
+    fs.readFileSync(bigDownloadTarget).equals(bigContent),
+    '下载内容与远端文件逐字节一致（300KB）'
+  )
+  const downloadSteps = progressRecords.filter((vo) => vo.direction === 'download')
+  assert(
+    downloadSteps.some((vo) => !vo.done && vo.transferred > 0) &&
+      downloadSteps.some((vo) => vo.done),
+    `下载过程上报了进度与完成事件（共 ${downloadSteps.length} 条）`
+  )
+
+  // 14. 删除非空目录时给出明确中文提示
+  await progressManager.mkdir(progressSession.sftpId, `${HOME}/notempty`)
+  await progressManager.uploadPaths({
+    sftpId: progressSession.sftpId,
+    remoteDir: `${HOME}/notempty`,
+    localPaths: [bigSource]
+  })
+  let notEmptyMessage = ''
+  try {
+    await progressManager.remove(progressSession.sftpId, `${HOME}/notempty`)
+  } catch (err) {
+    notEmptyMessage = err.message
+  }
+  assert(
+    notEmptyMessage.includes('目录非空'),
+    `删除非空目录时给出明确中文提示（${notEmptyMessage || '未报错'}）`
+  )
+
+  progressManager.close(progressSession.sftpId)
+  await sleep(300)
+  assert(connectionStats.active === 0, '关闭带进度的会话后底层连接被释放')
 
   server.close()
   console.log(`\n[结果] 全部通过，共 ${passed} 项`)
