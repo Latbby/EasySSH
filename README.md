@@ -210,6 +210,21 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
 
 两者都不如目录版可靠。确实需要正式安装包时，在普通机器上把 `win.target` 换回 `nsis` 重新打包。
 
+**分发包里还带了 `运行说明.txt`**：未签名产物会遇到 SmartScreen 提示，以及下面这种"双击没反应"，
+说明文件里给了自查与兜底启动方式。
+
+### 打包后处理：为什么必须清理 zip 暂存目录
+
+`npm run build:win` 末尾会执行 `scripts/fix-dist.cjs`，做两件事：删除 electron-builder 的 zip
+暂存目录 `dist/<name>-<version>-win/`，并把 `dist/` 下产物的强制完整性标签重置为 Medium（逐个校验 exe）。
+
+原因是实测踩到过：暂存目录里的文件会**继承工作区的 Low 标签**（afterPack 只重置了 `win-unpacked`），
+而 Windows「全部解压缩」的默认目标恰好是与压缩包同名的目录——用户在那里解压后拿到的
+`EasySSH.exe` 带 Low 标签，双击后 Chromium 沙箱初始化失败，进程以 `0x80000003` 静默退出，
+表现就是"点了『仍要运行』却毫无反应"，且 `%TEMP%\easyssh-startup.log` 里连"主进程开始执行"都没有。
+实测对比：同一份 zip 解压到普通目录（`C:\Users\<用户名>\EasySSH`）后不带标签、启动正常；
+把带 Low 标签的那份直接双击则立刻退出。
+
 ## 环境备注
 
 数据目录：应用名是 `EasySSH`，配置位于 `%APPDATA%\EasySSH`（连接 `connections.json`、分组

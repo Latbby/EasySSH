@@ -64,7 +64,12 @@ function finish(code, summary) {
     `[userData 产物] ${dataFiles.length ? dataFiles.join('、') : '(空，主进程可能未完成初始化)'}`
   )
 
-  fs.rmSync(userDataDir, { recursive: true, force: true })
+  // 清理临时数据目录：被杀掉的进程可能还占着个别文件，清理失败不能影响探测结论
+  try {
+    fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+  } catch {
+    // 忽略：临时目录留给系统清理
+  }
   fs.rmSync(logPath, { force: true })
   process.exit(code)
 }
