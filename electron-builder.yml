@@ -11,7 +11,13 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
-# 启动器随包分发：受管控环境下必须带 --no-sandbox 启动，直接双击 exe 会被静默拦截。
+# 打包后把产物的强制完整性标签重置为 Medium：构建若发生在被 Windows 沙箱打过
+# Low 标签的目录下（工作区内新建文件会继承该标签），exe 带 Low 标签会让进程被降到
+# Low 完整性级别，Chromium 沙箱无法初始化，双击表现为毫无反应。详见该脚本注释。
+afterPack: ./scripts/after-pack.cjs
+# 启动器随包分发，作为兜底：产物完整性标签无法重置时，双击 exe 会被降级为 Low 完整性
+# 级别并在创建窗口前静默退出，此时可用 start.bat / start.lnk（带 --no-sandbox）启动。
+# 标签正常时直接双击 exe 即可，见 scripts/after-pack.cjs。
 # start.lnk 与 exe 同目录，内部记录的是相对路径，因此整目录移动后依然有效。
 # 注意：bat 必须保持纯 ASCII 内容，中文注释在 cmd 的 GBK 环境下会解析错乱导致脚本整体失效。
 extraFiles:
