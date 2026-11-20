@@ -1504,26 +1504,78 @@ body.resizing {
   flex-direction: column;
 }
 
+/* 侧栏头部右侧操作区：新建分组图标按钮与「新建」并排 */
+.sidebar-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* 分组标题行：整行可点折叠，右侧操作按钮在悬停/聚焦时出现 */
 .conn-group-head {
   display: flex;
   align-items: center;
   gap: 6px;
   height: 28px;
   margin-top: 4px;
-  padding: 0 8px;
+  padding: 0 4px 0 0;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
-  background: transparent;
-  border: 1px solid transparent;
   border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.conn-group-head:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+/* 标题按钮本身不画背景，视觉上仍是「整行一个标题」 */
+.conn-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  padding: 0 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  justify-content: flex-start;
   text-align: left;
 }
 
-.conn-group-head:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--bg-hover);
-  border-color: transparent;
+.conn-group-toggle:hover:not(:disabled),
+.conn-group-toggle:active:not(:disabled) {
+  background: transparent;
+  border: none;
+  color: inherit;
+  transform: none;
+}
+
+.conn-group-head .conn-group-toggle {
+  padding-left: 8px;
+}
+
+/* 分组操作按钮：靠右、紧凑，不挤压分组名 */
+.conn-group-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.conn-group-tools .icon-btn {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
 }
 
 .conn-group-name {

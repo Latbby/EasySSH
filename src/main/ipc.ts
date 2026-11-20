@@ -18,10 +18,14 @@ import {
 } from '@shared/types'
 import {
   assignGroup,
+  createGroup,
   getConnection,
   isSecureStorageAvailable,
   listConnections,
+  listGroups,
   removeConnection,
+  removeGroup,
+  renameGroup,
   resolveCredential,
   saveConnection
 } from './store'
@@ -138,6 +142,12 @@ export function registerIpcHandlers(): IpcHandle {
   ipcMain.handle(IPC.connAssignGroup, (_event, dto: AssignGroupDTO): ConnectionVO[] =>
     assignGroup(dto.ids, dto.group)
   )
+  ipcMain.handle(IPC.connGroups, (): string[] => listGroups())
+  ipcMain.handle(IPC.connGroupCreate, (_event, name: string): string[] => createGroup(name))
+  ipcMain.handle(IPC.connGroupRename, (_event, from: string, to: string): string[] =>
+    renameGroup(from, to)
+  )
+  ipcMain.handle(IPC.connGroupRemove, (_event, name: string): string[] => removeGroup(name))
   // 只在用户打开编辑表单时按需回显该连接的凭据，不提供批量读取
   ipcMain.handle(IPC.connCredential, (_event, id: string): ConnectionCredentialVO => {
     const credential = resolveCredential(id)

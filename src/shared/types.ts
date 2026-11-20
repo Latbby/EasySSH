@@ -170,6 +170,10 @@ export const IPC = {
   connSave: 'conn:save',
   connRemove: 'conn:remove',
   connAssignGroup: 'conn:assign-group',
+  connGroups: 'conn:groups',
+  connGroupCreate: 'conn:group-create',
+  connGroupRename: 'conn:group-rename',
+  connGroupRemove: 'conn:group-remove',
   connCredential: 'conn:credential',
   secureAvailable: 'system:secure-available',
   pickPrivateKey: 'system:pick-private-key',
@@ -211,6 +215,17 @@ export interface SshClientApi {
     remove(id: string): Promise<void>
     /** 批量调整连接所属分组 */
     assignGroup(dto: AssignGroupDTO): Promise<ConnectionVO[]>
+    /**
+     * 查询全部分组名。已登记的分组在前并保持创建顺序，
+     * 仅由连接携带（老数据）的分组按名称排序追加在后面。
+     */
+    groups(): Promise<string[]>
+    /** 新建分组，返回最新分组列表；名称为空或重复时抛错 */
+    createGroup(name: string): Promise<string[]>
+    /** 重命名分组并同步组内连接，返回最新分组列表 */
+    renameGroup(from: string, to: string): Promise<string[]>
+    /** 删除分组（组内连接变为未分组），返回最新分组列表 */
+    removeGroup(name: string): Promise<string[]>
     /**
      * 读取某个连接已保存的凭据，仅供编辑表单按需回显。
      * 只接受连接 id，不提供批量接口，避免凭据被无关流程带回渲染进程。

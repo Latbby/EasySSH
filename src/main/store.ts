@@ -31,6 +31,69 @@ function storeFile(): string {
 }
 
 /**
+ * 分组登记文件路径。
+ * 分组是独立于连接的一等实体：没有这条记录，用户就建不出一个暂时还没有连接的分组。
+ */
+function groupsFile(): string {
+  return join(app.getPath('userData'), 'groups.json')
+}
+
+/**
+ * 读取已登记的分组名，保持磁盘上的顺序。
+ * 文件损坏时备份为 .bak 并重建，避免一条坏数据让分组功能不可用。
+ * @returns 去重、去空白后的分组名数组
+ */
+function loadGroups(): string[] {
+  const file = groupsFile()
+  if (!existsSync(file)) return []
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    if (!Array.isArray(parsed)) throw new Error('分组文件不是数组')
+    const names = parsed
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean)
+    return [...new Set(names)]
+  } catch {
+    try {
+      renameSync(file, `${file}.bak`)
+    } catch {
+      // 备份失败也不阻断：下面按空列表重建
+    }
+    return []
+  }
+}
+
+/**
+ * 原子写入分组列表。
+ * @param list 待写入的分组名
+ */
+function persistGroups(list: string[]): void {
+  const file = groupsFile()
+  const tmp = `${file}.tmp`
+  writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf8')
+  renameSync(tmp, file)
+}
+
+/**
+ * 查询全部分组名。
+ * 已登记的在前并保持创建顺序，仅由连接携带、尚未登记的分组按名称排序追加在后面，
+ * 这样老数据里的分组不会因为没登记而消失。
+ * @returns 分组名数组
+ */
+export function listGroups(): string[] {
+  const registered = loadGroups()
+  const derived = [
+    ...new Set(
+      load()
+        .map((row) => row.group?.trim())
+        .filter((name): name is string => Boolean(name))
+    )
+  ].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
+  return [...registered, ...derived.filter((name) => !registered.includes(name))]
+}
+
+/**
  * 读取磁盘上的连接记录。
  * @returns 连接记录数组；文件缺失或损坏时返回空数组，避免一条坏数据导致应用无法启动
  */
@@ -214,4 +277,66 @@ export function assignGroup(ids: string[], group: string): ConnectionVO[] {
   })
   persist(list)
   return list.map(toVO)
+}
+
+/**
+ * 新建分组。
+ * @param name 分组名，两端空白会被去掉
+ * @returns 最新的分组列表
+ * @throws 名称为空或已存在时抛出可读错误
+ */
+export function createGroup(name: string): string[] {
+  const target = name.trim()
+  if (!target) throw new Error('分组名不能为空')
+  if (listGroups().includes(target)) throw new Error(`分组「${target}」已存在`)
+  persistGroups([...loadGroups(), target])
+  return listGroups()
+}
+
+/**
+ * 重命名分组，同时把该分组下的连接一起改到新名字下。
+ * @param from 原分组名
+ * @param to 新分组名，两端空白会被去掉
+ * @returns 最新的分组列表
+ * @throws 新名称为空、重名或原分组不存在时抛出可读错误
+ */
+export function renameGroup(from: string, to: string): string[] {
+  const source = from.trim()
+  const target = to.trim()
+  if (!target) throw new Error('分组名不能为空')
+  if (source === target) return listGroups()
+  const groups = listGroups()
+  if (!groups.includes(source)) throw new Error(`分组「${source}」不存在`)
+  if (groups.includes(target)) throw new Error(`分组「${target}」已存在`)
+
+  // 已登记的原名字就地替换，未登记的（老数据）直接补到末尾
+  const registered = loadGroups()
+  persistGroups(
+    registered.includes(source)
+      ? registered.map((item) => (item === source ? target : item))
+      : [...registered, target]
+  )
+
+  const list = load()
+  list.forEach((item) => {
+    if (item.group?.trim() === source) item.group = target
+  })
+  persist(list)
+  return listGroups()
+}
+
+/**
+ * 删除分组，组内连接变为未分组（连接本身不会被删除）。
+ * @param name 分组名
+ * @returns 最新的分组列表
+ */
+export function removeGroup(name: string): string[] {
+  const target = name.trim()
+  persistGroups(loadGroups().filter((item) => item !== target))
+  const list = load()
+  list.forEach((item) => {
+    if (item.group?.trim() === target) delete item.group
+  })
+  persist(list)
+  return listGroups()
 }

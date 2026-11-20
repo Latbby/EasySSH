@@ -4,6 +4,12 @@ import { toMessage } from '../utils'
 import { useFocusTrap } from '../useFocusTrap'
 import Icon from './Icon'
 
+/**
+ * 分组下拉框里「新建分组…」的哨兵值。
+ * 以 NUL 字符开头，正常分组名不可能与它相同，因此不会和真实分组名撞车。
+ */
+const NEW_GROUP_OPTION = '\u0000new-group'
+
 interface Props {
   /** 编辑时传入已有连接，新增时为空 */
   initial?: ConnectionVO
@@ -46,8 +52,15 @@ function ConnectionForm({
   const [host, setHost] = useState(initial?.host ?? '')
   const [port, setPort] = useState(String(initial?.port ?? 22))
   const [username, setUsername] = useState(initial?.username ?? '')
-  // 分组名可留空，空串表示未分组
-  const [group, setGroup] = useState(initial?.group ?? '')
+  /**
+   * 分组下拉框的选中值：空串表示未分组，NEW_GROUP_OPTION 表示「新建分组…」，其余是已有分组名。
+   * 编辑旧数据时组名可能带两端空白，先去掉再匹配选项，否则下拉框会对不上。
+   */
+  const [groupChoice, setGroupChoice] = useState(initial?.group?.trim() ?? '')
+  /** 主进程返回的分组列表，作为下拉框选项 */
+  const [groupNames, setGroupNames] = useState<string[]>([])
+  /** 选「新建分组…」时输入的新分组名 */
+  const [newGroupName, setNewGroupName] = useState('')
   const [authType, setAuthType] = useState<AuthType>(initial?.authType ?? 'password')
   // 密码与口令在编辑已保存凭据的连接时由主进程回显，回显值原样提交即等价于不改动
   const [password, setPassword] = useState('')
@@ -92,6 +105,37 @@ function ConnectionForm({
     }
   }, [hasStoredCredential, inheritsCredential, initial?.id, inheritedCredentialFrom])
 
+  // 分组下拉框的选项来自主进程；拉取失败时退化为「未分组 / 新建分组…」，不影响保存连接
+  useEffect(() => {
+    let alive = true
+    window.api.connections
+      .groups()
+      .then((names) => {
+        if (alive) setGroupNames(names)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  /**
+   * 确保分组已登记：已存在直接用，不存在则交给主进程创建。
+   * 主进程对重名会报错（本地列表过期或并发创建都会命中），所以创建失败后再查一次列表，
+   * 确实已有同名分组就继续保存，否则把原始错误抛给表单展示。
+   * @param name 分组名，已去掉两端空白
+   */
+  const ensureGroup = async (name: string): Promise<void> => {
+    if (groupNames.includes(name)) return
+    try {
+      setGroupNames(await window.api.connections.createGroup(name))
+    } catch (err) {
+      const latest = await window.api.connections.groups().catch(() => groupNames)
+      if (!latest.includes(name)) throw err
+      setGroupNames(latest)
+    }
+  }
+
   /** 弹出系统文件选择框挑选私钥文件 */
   const pickPrivateKey = async (): Promise<void> => {
     const picked = await window.api.system.pickPrivateKey()
@@ -114,10 +158,18 @@ function ConnectionForm({
       setError('端口必须是 1-65535 之间的整数')
       return
     }
+    // 选「新建分组…」却没填名称时先拦下来，不必绕到主进程才报错
+    const newGroup = newGroupName.trim()
+    if (groupChoice === NEW_GROUP_OPTION && !newGroup) {
+      setError('请填写新分组名称')
+      return
+    }
 
     setBusy(true)
     setError(null)
     try {
+      // 新建分组要排在保存之前：连接得落到一个已经存在的分组上
+      if (groupChoice === NEW_GROUP_OPTION) await ensureGroup(newGroup)
       await onSubmit({
         id: isCreate ? undefined : initial?.id,
         name: name.trim() || `${username.trim()}@${host.trim()}`,
@@ -126,7 +178,7 @@ function ConnectionForm({
         username: username.trim(),
         authType,
         // 分组名两端空白无意义，空串即「未分组」，由 store 统一归一化
-        group: group.trim(),
+        group: groupChoice === NEW_GROUP_OPTION ? newGroup : groupChoice.trim(),
         privateKeyPath: authType === 'privateKey' ? privateKeyPath.trim() || undefined : undefined,
         // 留空的凭据不提交，避免编辑连接时误清空已保存的密码
         // 勾选「清除已保存的凭据」后提交空串即清除语义，密码与私钥口令一并清掉
@@ -163,6 +215,11 @@ function ConnectionForm({
       : inheritsCredential
         ? '已从原连接带入，可修改'
         : '私钥未加密时留空'
+  // 下拉选项：当前连接已有的分组也补进去，分组列表拉取失败时下拉框仍能显示正确项
+  const groupOptions =
+    groupChoice !== '' && groupChoice !== NEW_GROUP_OPTION && !groupNames.includes(groupChoice)
+      ? [...groupNames, groupChoice]
+      : groupNames
 
   return (
     <div
@@ -240,12 +297,29 @@ function ConnectionForm({
 
           <label className="field">
             <span>分组</span>
-            <input
-              value={group}
-              onChange={(event) => setGroup(event.target.value)}
-              placeholder="留空表示未分组"
-            />
+            <select value={groupChoice} onChange={(event) => setGroupChoice(event.target.value)}>
+              <option value="">（未分组）</option>
+              {groupOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+              <option value={NEW_GROUP_OPTION}>＋ 新建分组…</option>
+            </select>
           </label>
+
+          {/* 选「新建分组…」才出现名称输入框，保存时先建分组再落连接 */}
+          {groupChoice === NEW_GROUP_OPTION && (
+            <label className="field">
+              <span>新分组名称</span>
+              <input
+                value={newGroupName}
+                onChange={(event) => setNewGroupName(event.target.value)}
+                placeholder="例如：生产环境"
+                autoFocus
+              />
+            </label>
+          )}
 
           <label className="field">
             <span>认证方式</span>

@@ -12,6 +12,10 @@ const api: SshClientApi = {
     save: (dto) => ipcRenderer.invoke(IPC.connSave, dto),
     remove: (id) => ipcRenderer.invoke(IPC.connRemove, id),
     assignGroup: (dto) => ipcRenderer.invoke(IPC.connAssignGroup, dto),
+    groups: () => ipcRenderer.invoke(IPC.connGroups),
+    createGroup: (name) => ipcRenderer.invoke(IPC.connGroupCreate, name),
+    renameGroup: (from, to) => ipcRenderer.invoke(IPC.connGroupRename, from, to),
+    removeGroup: (name) => ipcRenderer.invoke(IPC.connGroupRemove, name),
     getCredential: (id) => ipcRenderer.invoke(IPC.connCredential, id)
   },
   system: {

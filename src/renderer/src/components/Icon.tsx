@@ -13,6 +13,7 @@ export type IconName =
   | 'chevron-down'
   | 'chevron-right'
   | 'folder'
+  | 'folder-plus'
   | 'file'
   | 'link'
   | 'search'
@@ -77,6 +78,12 @@ const PATHS: Record<IconName, JSX.Element> = {
   'chevron-right': <path d="M6.4 4.6L9.8 8l-3.4 3.4" />,
   folder: (
     <path d="M3 5.3a1.3 1.3 0 0 1 1.3-1.3h1.9l1.2 1.6h5.3A1.3 1.3 0 0 1 13 6.9v4.5a1.3 1.3 0 0 1-1.3 1.3H4.3A1.3 1.3 0 0 1 3 11.4V5.3z" />
+  ),
+  'folder-plus': (
+    <>
+      <path d="M3 5.3a1.3 1.3 0 0 1 1.3-1.3h1.9l1.2 1.6h5.3A1.3 1.3 0 0 1 13 6.9v4.5a1.3 1.3 0 0 1-1.3 1.3H4.3A1.3 1.3 0 0 1 3 11.4V5.3z" />
+      <path d="M8 7.3v3.6M6.2 9.1h3.6" />
+    </>
   ),
   file: (
     <>

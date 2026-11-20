@@ -137,6 +137,71 @@ function main() {
   fs.writeFileSync(storeFile, '{ 这不是合法 JSON', 'utf8')
   assert(store.listConnections().length === 0, '配置文件损坏时降级为空列表而非崩溃')
 
+  // 11. 分组：独立登记（空分组也能存在）、重命名同步组内连接、删除后连接变未分组
+  const groupsFile = path.join(tmpDir, 'groups.json')
+  const groupHost = store.saveConnection({
+    name: '分组机',
+    host: '10.0.0.9',
+    port: 22,
+    username: 'root',
+    authType: 'password',
+    password: 'pw',
+    group: '老分组'
+  })
+  assert(
+    JSON.stringify(store.listGroups()) === JSON.stringify(['老分组']),
+    `仅由连接携带的分组也出现在分组列表里（实际 ${JSON.stringify(store.listGroups())}）`
+  )
+
+  const afterCreate = store.createGroup('空分组')
+  assert(
+    JSON.stringify(afterCreate) === JSON.stringify(['空分组', '老分组']),
+    `新建的空分组登记在已分组之后（实际 ${JSON.stringify(afterCreate)}）`
+  )
+  assert(
+    JSON.parse(fs.readFileSync(groupsFile, 'utf8')).includes('空分组'),
+    '分组已持久化到 groups.json'
+  )
+  let duplicateRejected = false
+  try {
+    store.createGroup('空分组')
+  } catch {
+    duplicateRejected = true
+  }
+  assert(duplicateRejected, '重名分组被拒绝')
+  let emptyRejected = false
+  try {
+    store.createGroup('   ')
+  } catch {
+    emptyRejected = true
+  }
+  assert(emptyRejected, '空白分组名被拒绝')
+
+  const afterRename = store.renameGroup('老分组', '新分组')
+  assert(
+    afterRename.includes('新分组') && !afterRename.includes('老分组'),
+    `重命名后分组列表同步更新（实际 ${JSON.stringify(afterRename)}）`
+  )
+  assert(
+    store.listConnections().find((vo) => vo.id === groupHost.id).group === '新分组',
+    '重命名分组时组内连接的 group 一起改到新名字'
+  )
+
+  const afterRemove = store.removeGroup('新分组')
+  assert(!afterRemove.includes('新分组'), `删除后分组从列表消失（实际 ${JSON.stringify(afterRemove)}）`)
+  const survived = store.listConnections().find((vo) => vo.id === groupHost.id)
+  assert(Boolean(survived), '删除分组不会删除组内连接')
+  assert(survived.group === undefined, '删除分组后组内连接变为未分组')
+  assert(
+    JSON.stringify(store.listGroups()) === JSON.stringify(['空分组']),
+    `删除分组后只剩显式登记的空分组（实际 ${JSON.stringify(store.listGroups())}）`
+  )
+
+  // 分组文件损坏时按空列表重建并备份，不能因为一条坏数据让分组功能不可用
+  fs.writeFileSync(groupsFile, '{ 坏掉的 JSON', 'utf8')
+  assert(store.listGroups().length === 0, '分组文件损坏时降级为空列表而非崩溃')
+  assert(fs.existsSync(`${groupsFile}.bak`), '损坏的分组文件被备份为 .bak')
+
   fs.rmSync(tmpDir, { recursive: true, force: true })
   console.log(`\n[结果] 全部通过，共 ${passed} 项`)
 }
