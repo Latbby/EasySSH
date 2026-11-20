@@ -30,3 +30,13 @@ export interface SftpTab {
 
 /** 工作区中打开的标签 */
 export type AppTab = TerminalTab | SftpTab
+
+/** 提示条类型，决定配色与自动消失时长 */
+export type ToastKind = 'success' | 'error' | 'info'
+
+/** 一条提示，id 自增用于重置自动关闭计时器 */
+export interface AppToast {
+  id: number
+  kind: ToastKind
+  text: string
+}

@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { AuthType, ConnectionVO, SaveConnectionDTO } from '@shared/types'
 import { toMessage } from '../utils'
 
 interface Props {
   /** 编辑时传入已有连接，新增时为空 */
   initial?: ConnectionVO
+  /** 新增模式：标题显示「新建连接」，提交时不带 id；复制连接会传空 id 的草稿，同样按新增处理 */
+  isNew?: boolean
   /** 提交保存，由本组件负责把错误展示在表单内 */
   onSubmit(dto: SaveConnectionDTO): Promise<void>
   /** 取消并关闭表单 */
@@ -16,7 +18,12 @@ interface Props {
  * @param props 见 Props
  * @returns 表单弹窗元素
  */
-function ConnectionForm({ initial, onSubmit, onCancel }: Props): React.JSX.Element {
+function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JSX.Element {
+  // isNew 为真或草稿 id 为空都算新增：复制连接传进来的 draft 就是没有 id 的
+  const isCreate = isNew === true || !initial?.id
+  // 「清除凭据」只对已保存的连接有意义，新增与复制场景下没有可清除的凭据
+  const hasStoredCredential = !isCreate && initial?.hasCredential === true
+
   const [name, setName] = useState(initial?.name ?? '')
   const [host, setHost] = useState(initial?.host ?? '')
   const [port, setPort] = useState(String(initial?.port ?? 22))
@@ -26,8 +33,18 @@ function ConnectionForm({ initial, onSubmit, onCancel }: Props): React.JSX.Eleme
   const [password, setPassword] = useState('')
   const [privateKeyPath, setPrivateKeyPath] = useState(initial?.privateKeyPath ?? '')
   const [passphrase, setPassphrase] = useState('')
+  const [clearCredential, setClearCredential] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  // Esc 关闭表单：监听挂在 window 上，焦点不在表单内时也能关闭
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onCancel()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onCancel])
 
   /** 弹出系统文件选择框挑选私钥文件 */
   const pickPrivateKey = async (): Promise<void> => {
@@ -56,7 +73,7 @@ function ConnectionForm({ initial, onSubmit, onCancel }: Props): React.JSX.Eleme
     setError(null)
     try {
       await onSubmit({
-        id: initial?.id,
+        id: isCreate ? undefined : initial?.id,
         name: name.trim() || `${username.trim()}@${host.trim()}`,
         host: host.trim(),
         port: portNumber,
@@ -64,8 +81,13 @@ function ConnectionForm({ initial, onSubmit, onCancel }: Props): React.JSX.Eleme
         authType,
         privateKeyPath: authType === 'privateKey' ? privateKeyPath.trim() || undefined : undefined,
         // 留空的凭据不提交，避免编辑连接时误清空已保存的密码
-        password: authType === 'password' && password ? password : undefined,
-        passphrase: authType === 'privateKey' && passphrase ? passphrase : undefined
+        // 勾选「清除已保存的凭据」后提交空串即清除语义，密码与私钥口令一并清掉
+        password: clearCredential ? '' : authType === 'password' && password ? password : undefined,
+        passphrase: clearCredential
+          ? ''
+          : authType === 'privateKey' && passphrase
+            ? passphrase
+            : undefined
       })
     } catch (err) {
       setError(toMessage(err))
@@ -76,8 +98,9 @@ function ConnectionForm({ initial, onSubmit, onCancel }: Props): React.JSX.Eleme
 
   return (
     <div className="modal-mask" onClick={onCancel}>
+      {/* 表单内文本框回车会走浏览器隐式提交，等价于点「保存」 */}
       <form className="modal" onClick={(event) => event.stopPropagation()} onSubmit={handleSubmit}>
-        <h2 className="modal-title">{initial ? '编辑连接' : '新建连接'}</h2>
+        <h2 className="modal-title">{isCreate ? '新建连接' : '编辑连接'}</h2>
 
         <label className="field">
           <span>名称</span>
@@ -126,7 +149,13 @@ function ConnectionForm({ initial, onSubmit, onCancel }: Props): React.JSX.Eleme
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              placeholder={initial?.hasCredential ? '留空表示保留已保存的密码' : '可选'}
+              placeholder={
+                clearCredential
+                  ? '已勾选清除，保存后密码被清空'
+                  : hasStoredCredential
+                    ? '留空表示保留已保存的密码'
+                    : '可选'
+              }
             />
           </label>
         ) : (
@@ -152,11 +181,28 @@ function ConnectionForm({ initial, onSubmit, onCancel }: Props): React.JSX.Eleme
                 value={passphrase}
                 onChange={(event) => setPassphrase(event.target.value)}
                 placeholder={
-                  initial?.hasCredential ? '留空表示保留已保存的口令' : '私钥未加密时留空'
+                  clearCredential
+                    ? '已勾选清除，保存后口令被清空'
+                    : hasStoredCredential
+                      ? '留空表示保留已保存的口令'
+                      : '私钥未加密时留空'
                 }
               />
             </label>
           </>
+        )}
+
+        {hasStoredCredential && (
+          <label className="field">
+            <span className="field-row">
+              <input
+                type="checkbox"
+                checked={clearCredential}
+                onChange={(event) => setClearCredential(event.target.checked)}
+              />
+              <span>清除已保存的凭据（同时清除密码与私钥口令，保存后生效）</span>
+            </span>
+          </label>
         )}
 
         {error && <p className="form-error">{error}</p>}
