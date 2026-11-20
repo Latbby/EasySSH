@@ -1,7 +1,8 @@
 {
-  "name": "ssh-client",
+  "name": "easyssh",
+  "productName": "EasySSH",
   "version": "1.0.0",
-  "description": "An Electron application with React and TypeScript",
+  "description": "EasySSH —— 简洁的跨平台 SSH 客户端",
   "main": "./out/main/index.js",
   "author": "zhonghaihua",
   "homepage": "https://electron-vite.org",

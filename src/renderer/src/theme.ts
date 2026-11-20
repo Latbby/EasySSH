@@ -12,10 +12,13 @@ export type ThemeMode = 'system' | 'light' | 'dark'
 export type ResolvedTheme = 'light' | 'dark'
 
 /** 主题模式持久化键名 */
-const THEME_KEY = 'ssh-client:theme'
+const THEME_KEY = 'easyssh:theme'
+
+/** 更名前的旧键名：读不到新键时回退读它，避免老用户丢失主题选择 */
+const LEGACY_THEME_KEY = 'ssh-client:theme'
 
 /** 主题变更广播事件名，同一窗口内的组件靠它同步 */
-const THEME_EVENT = 'ssh-client:theme'
+const THEME_EVENT = 'easyssh:theme'
 
 /** 系统深色偏好的媒体查询 */
 const DARK_QUERY = '(prefers-color-scheme: dark)'
@@ -40,7 +43,8 @@ function getDarkQuery(): MediaQueryList {
  * @returns 已持久化的主题模式；缺失或非法时返回 'system'
  */
 export function readThemeMode(): ThemeMode {
-  const raw = window.localStorage.getItem(THEME_KEY)
+  const raw =
+    window.localStorage.getItem(THEME_KEY) ?? window.localStorage.getItem(LEGACY_THEME_KEY)
   return THEME_MODES.includes(raw as ThemeMode) ? (raw as ThemeMode) : 'system'
 }
 

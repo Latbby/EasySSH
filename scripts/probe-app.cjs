@@ -12,7 +12,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 
-const target = process.argv[2] || path.resolve(__dirname, '../dist/win-unpacked/ssh-client.exe')
+const target = process.argv[2] || path.resolve(__dirname, '../dist/win-unpacked/EasySSH.exe')
 const lookMs = Number(process.argv[3] || 10000)
 /** 目标之后的参数原样传给被测程序，例如 electron.exe 需要把应用目录作为第一个参数 */
 const extraArgs = process.argv.slice(4)
@@ -24,13 +24,13 @@ if (!fs.existsSync(target)) {
 }
 
 /** 用临时目录承接 userData，避免污染真实的用户配置 */
-const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-client-probe-'))
+const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'easyssh-probe-'))
 const logFd = fs.openSync(logPath, 'w')
 
 const env = { ...process.env }
 // 本环境默认注入 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node 运行
 delete env.ELECTRON_RUN_AS_NODE
-env.SSH_CLIENT_USER_DATA = userDataDir
+env.EASYSSH_USER_DATA = userDataDir
 
 console.log(`[探测] 目标：${target}`)
 console.log(`[探测] 观察时长：${lookMs} ms`)

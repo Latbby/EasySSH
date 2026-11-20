@@ -5,7 +5,7 @@ rem
 rem  Same flags as start.bat, but this window stays open and shows
 rem  the exit code, so failures are visible instead of silent.
 rem
-rem  Launch log: %TEMP%\ssh-client-startup.log
+rem  Launch log: %TEMP%\easyssh-startup.log
 rem ============================================================
 
 title SSH Client - Diagnostics
@@ -13,7 +13,7 @@ title SSH Client - Diagnostics
 echo ============================================================
 echo  SSH Client - Diagnostic launch
 echo ------------------------------------------------------------
-echo  Launch log: %TEMP%\ssh-client-startup.log
+echo  Launch log: %TEMP%\easyssh-startup.log
 echo ============================================================
 echo.
 
@@ -21,7 +21,7 @@ set ELECTRON_ENABLE_LOGGING=1
 set ELECTRON_ENABLE_STACK_DUMPING=1
 
 cd /d "%~dp0"
-"ssh-client.exe" --no-sandbox
+"EasySSH.exe" --no-sandbox
 set EXITCODE=%ERRORLEVEL%
 
 echo.

@@ -51,14 +51,14 @@ function cacheKey(sftpId: string, remotePath: string): string {
 }
 
 /**
- * 计算本地临时文件路径：%TEMP%/ssh-client-edit/<sftpId>/<文件名>。
+ * 计算本地临时文件路径：%TEMP%/easyssh-edit/<sftpId>/<文件名>。
  * 按会话分目录可以避免同名文件互相覆盖，临时文件本身不随会话关闭删除。
  * @param sftpId SFTP 会话 id
  * @param remotePath 远程文件绝对路径
  * @returns 本地绝对路径
  */
 function localFilePath(sftpId: string, remotePath: string): string {
-  return join(app.getPath('temp'), 'ssh-client-edit', sftpId, basename(remotePath))
+  return join(app.getPath('temp'), 'easyssh-edit', sftpId, basename(remotePath))
 }
 
 /**
@@ -165,7 +165,7 @@ export async function editRemoteFile(
           err ? reject(toReadableError(err, `下载 ${remotePath}`)) : resolve()
         )
       })
-      console.log(`[ssh-client] 远程编辑临时文件：${base.localPath}，保存后自动回传 ${remotePath}`)
+      console.log(`[EasySSH] 远程编辑临时文件：${base.localPath}，保存后自动回传 ${remotePath}`)
     }
 
     const openError = await shell.openPath(base.localPath)

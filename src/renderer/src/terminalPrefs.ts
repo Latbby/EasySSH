@@ -5,10 +5,13 @@
  */
 
 /** 字号持久化键名 */
-const FONT_SIZE_KEY = 'ssh-client:font-size'
+const FONT_SIZE_KEY = 'easyssh:font-size'
+
+/** 更名前的旧键名：读不到新键时回退读它，避免老用户丢失字号偏好 */
+const LEGACY_FONT_SIZE_KEY = 'ssh-client:font-size'
 
 /** 字号变更广播事件名 */
-const FONT_SIZE_EVENT = 'ssh-client:font-size-change'
+const FONT_SIZE_EVENT = 'easyssh:font-size-change'
 
 /** 默认字号 */
 export const DEFAULT_FONT_SIZE = 14
@@ -34,7 +37,8 @@ function clampFontSize(size: number): number {
  * @returns 已持久化的字号；缺失或非法时返回默认字号
  */
 export function readFontSize(): number {
-  const raw = window.localStorage.getItem(FONT_SIZE_KEY)
+  const raw =
+    window.localStorage.getItem(FONT_SIZE_KEY) ?? window.localStorage.getItem(LEGACY_FONT_SIZE_KEY)
   return raw === null ? DEFAULT_FONT_SIZE : clampFontSize(Number(raw))
 }
 

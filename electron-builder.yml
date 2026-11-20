@@ -1,5 +1,5 @@
-appId: com.sshclient.app
-productName: ssh-client
+appId: com.easyssh.app
+productName: EasySSH
 directories:
   buildResources: build
 files:
@@ -28,7 +28,7 @@ extraFiles:
   - from: build/run-debug.bat
     to: run-debug.bat
 win:
-  executableName: ssh-client
+  executableName: EasySSH
   # 只产出免安装目录版（zip 会连同 win-unpacked 一起生成）。
   # 未使用 nsis：其构建过程需要实际运行一次生成的 exe 来提取卸载器，受限环境下会失败。
   # 未使用 portable：它启动时要先把应用自解压到 %TEMP% 再执行，容易被安全软件拦截并报

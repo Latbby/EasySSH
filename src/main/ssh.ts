@@ -75,11 +75,11 @@ function loadKnownHosts(): Record<string, string> {
       try {
         renameSync(file, `${file}.bak`)
         console.warn(
-          `[ssh-client] known_hosts 无法解析，已备份为 ${file}.bak 并重建空表，本次连接将重新记录主机指纹`
+          `[EasySSH] known_hosts 无法解析，已备份为 ${file}.bak 并重建空表，本次连接将重新记录主机指纹`
         )
       } catch {
         console.warn(
-          `[ssh-client] known_hosts 无法解析且备份失败（${file}），本次连接将重新记录主机指纹`
+          `[EasySSH] known_hosts 无法解析且备份失败（${file}），本次连接将重新记录主机指纹`
         )
       }
     }

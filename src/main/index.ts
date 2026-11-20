@@ -1,5 +1,5 @@
 import { app, shell, BrowserWindow, Menu } from 'electron'
-import { appendFileSync } from 'fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -11,7 +11,7 @@ import { registerIpcHandlers, type IpcHandle } from './ipc'
  *
  * Windows 按文件标签继承强制完整性级别。若打包目录带 `Low Mandatory Level` 标签
  * （例如在被 Windows 沙箱打标过的工作区里构建——沙箱以受限令牌 + Low 完整性派生进程，
- * 它在工作区里新建的文件会继承这个可继承的 Low 标签），ssh-client.exe 也会带上该标签：
+ * 它在工作区里新建的文件会继承这个可继承的 Low 标签），EasySSH.exe 也会带上该标签：
  * 此时即使只是普通双击，Windows 也会把进程降到 Low 完整性级别。Low IL 进程无法为 Chromium
  * 的沙箱子进程在 %TEMP%、%APPDATA% 这类 Medium 目录上配置 ACL，浏览器进程会在本文件执行
  * 之前以 0x80000003(STATUS_BREAKPOINT) 退出，表现为双击毫无反应，且没有窗口、没有日志、
@@ -26,12 +26,46 @@ import { registerIpcHandlers, type IpcHandle } from './ipc'
  */
 
 // 允许通过环境变量覆盖数据目录，便于自动化测试与便携部署，必须在 app ready 之前设置
-if (process.env.SSH_CLIENT_USER_DATA) {
-  app.setPath('userData', process.env.SSH_CLIENT_USER_DATA)
+if (process.env.EASYSSH_USER_DATA) {
+  app.setPath('userData', process.env.EASYSSH_USER_DATA)
 }
 
 /** 选定并缓存的日志文件路径 */
 let logFile: string | undefined
+
+/**
+ * 更名后的数据目录迁移。
+ * 应用名从 ssh-client 改成 EasySSH 后，Electron 的 userData 目录随之改变；
+ * 这里在首次启动新版本时把旧目录里的连接、已知主机、分组与会话快照复制过来，
+ * 否则老用户升级后会看到"连接全没了"。只在目标文件不存在时复制，不覆盖新数据。
+ */
+function migrateLegacyUserData(): void {
+  try {
+    // 数据目录被环境变量显式指定时（自动化测试 / 便携部署）不做迁移
+    if (process.env.EASYSSH_USER_DATA) return
+    const current = app.getPath('userData')
+    const legacy = join(app.getPath('appData'), 'ssh-client')
+    if (current === legacy || !existsSync(legacy)) return
+    mkdirSync(current, { recursive: true })
+    const migrated: string[] = []
+    for (const name of ['connections.json', 'known_hosts.json', 'groups.json', 'session.json']) {
+      const from = join(legacy, name)
+      const to = join(current, name)
+      if (existsSync(from) && !existsSync(to)) {
+        copyFileSync(from, to)
+        migrated.push(name)
+      }
+    }
+    if (migrated.length > 0) {
+      log(
+        `已从旧数据目录迁移 ${migrated.length} 个文件（${migrated.join('、')}）：${legacy} → ${current}`
+      )
+    }
+  } catch (error) {
+    // 迁移失败不能影响启动，用户仍可手动复制旧目录里的文件
+    log(`[旧数据迁移失败] ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
 
 /**
  * 依次尝试可写的日志位置并缓存第一个成功的。
@@ -41,9 +75,9 @@ let logFile: string | undefined
 function resolveLogFile(): string | undefined {
   if (logFile) return logFile
   const candidates = [
-    join(tmpdir(), 'ssh-client-startup.log'),
+    join(tmpdir(), 'easyssh-startup.log'),
     join(app.getPath('userData'), 'startup.log'),
-    join(dirname(process.execPath), 'ssh-client-startup.log')
+    join(dirname(process.execPath), 'easyssh-startup.log')
   ]
   for (const candidate of candidates) {
     try {
@@ -77,8 +111,11 @@ log(
   `electron=${process.versions.electron} node=${process.versions.node} packaged=${app.isPackaged}`
 )
 log(
-  `兼容模式=${process.env.SSH_CLIENT_NO_COMPAT === '1' ? '已关闭' : '开启'} 日志=${resolveLogFile()}`
+  `兼容模式=${process.env.EASYSSH_NO_COMPAT === '1' ? '已关闭' : '开启'} 日志=${resolveLogFile()}`
 )
+
+// 应用更名（ssh-client → EasySSH）会把 userData 目录换掉，首次启动时迁移旧数据
+migrateLegacyUserData()
 
 // 未捕获异常必须落盘，否则用户只会看到窗口一闪而过或完全没有反应
 process.on('uncaughtException', (error) => {
@@ -102,7 +139,7 @@ function createWindow(): void {
     autoHideMenuBar: true,
     // 与界面底色一致，避免窗口出现到首帧渲染之间闪一下白底
     backgroundColor: '#0e1015',
-    title: 'SSH 客户端',
+    title: 'EasySSH',
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

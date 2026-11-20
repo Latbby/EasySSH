@@ -30,7 +30,9 @@ const SIDEBAR_MAX_WIDTH = 560
 /** 工作区保底可用宽度（含分隔条） */
 const WORKSPACE_MIN_WIDTH = 486
 /** 侧栏宽度持久化键 */
-const SIDEBAR_WIDTH_KEY = 'ssh-client:sidebar-width'
+const SIDEBAR_WIDTH_KEY = 'easyssh:sidebar-width'
+/** 更名前的旧键名：读不到新键时回退读它，避免老用户丢失宽度设置 */
+const LEGACY_SIDEBAR_WIDTH_KEY = 'ssh-client:sidebar-width'
 
 /**
  * 当前窗口下侧栏允许的最大宽度。
@@ -57,7 +59,9 @@ function clampSidebarWidth(width: number): number {
  * @returns 合法宽度，缺失或非法时返回默认值
  */
 function readSidebarWidth(): number {
-  const raw = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
+  const stored =
+    localStorage.getItem(SIDEBAR_WIDTH_KEY) ?? localStorage.getItem(LEGACY_SIDEBAR_WIDTH_KEY)
+  const raw = Number(stored)
   return Number.isFinite(raw) && raw > 0 ? clampSidebarWidth(raw) : SIDEBAR_DEFAULT_WIDTH
 }
 
@@ -229,7 +233,7 @@ function App(): React.JSX.Element {
   // 窗口标题跟随当前标签，便于在任务栏与多窗口场景下区分会话
   useEffect(() => {
     const active = session.tabs.find((tab) => tab.id === session.activeId)
-    document.title = active ? `${active.title} · SSH 客户端` : 'SSH 客户端'
+    document.title = active ? `${active.title} · EasySSH` : 'EasySSH'
   }, [session.tabs, session.activeId])
 
   /**
