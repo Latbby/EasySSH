@@ -14,6 +14,12 @@ interface Props {
   onSelectAll(): void
   /** 打开搜索栏 */
   onFind(): void
+  /** 放大终端字号 */
+  onZoomIn(): void
+  /** 缩小终端字号 */
+  onZoomOut(): void
+  /** 复位终端字号 */
+  onZoomReset(): void
   /** 清屏 */
   onClear(): void
   /** 关闭菜单 */
@@ -35,6 +41,9 @@ function TerminalContextMenu({
   onPaste,
   onSelectAll,
   onFind,
+  onZoomIn,
+  onZoomOut,
+  onZoomReset,
   onClear,
   onClose
 }: Props): React.JSX.Element {
@@ -111,6 +120,20 @@ function TerminalContextMenu({
       <button className="ctx-menu-item" role="menuitem" onClick={pick(onFind)}>
         查找
         <span className="ctx-menu-shortcut">Ctrl+F</span>
+      </button>
+      <div className="ctx-menu-sep" />
+      {/* 字号操作放在清屏之前，便于用户在不记快捷键的情况下发现缩放能力 */}
+      <button className="ctx-menu-item" role="menuitem" onClick={pick(onZoomIn)}>
+        放大字号
+        <span className="ctx-menu-shortcut">Ctrl+=</span>
+      </button>
+      <button className="ctx-menu-item" role="menuitem" onClick={pick(onZoomOut)}>
+        缩小字号
+        <span className="ctx-menu-shortcut">Ctrl+-</span>
+      </button>
+      <button className="ctx-menu-item" role="menuitem" onClick={pick(onZoomReset)}>
+        复位字号
+        <span className="ctx-menu-shortcut">Ctrl+0</span>
       </button>
       <button className="ctx-menu-item" role="menuitem" onClick={pick(onClear)}>
         清屏

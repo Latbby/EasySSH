@@ -82,6 +82,12 @@ function terminalThemeFor(theme: ResolvedTheme): ITheme {
   return theme === 'light' ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME
 }
 
+/** Ctrl+滚轮累计滚动量达到该阈值才走一步缩放，避免触控板一次滑动跳好几级 */
+const WHEEL_ZOOM_THRESHOLD = 40
+
+/** 缩放提示 HUD 的显示时长（毫秒），到点后隐藏 */
+const HUD_HIDE_DELAY_MS = 900
+
 /**
  * 单个终端标签的渲染容器。
  * 组件挂载时创建 xterm 实例，标签切换通过显隐而非卸载完成，避免丢失回滚缓冲。
@@ -107,6 +113,8 @@ function TerminalView({
   const pendingFontSizeRef = useRef<number | null>(null)
   /** 菜单已展开时再次右键则置位，跳过随后的 contextmenu，实现“再次右键关闭” */
   const skipContextRef = useRef(false)
+  /** Ctrl+滚轮累计的滚动量，达到阈值并消费一次后扣除，余量留给下一次 */
+  const wheelAccRef = useRef(0)
 
   /** 搜索栏是否展开 */
   const [searchOpen, setSearchOpen] = useState(false)
@@ -116,6 +124,24 @@ function TerminalView({
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
   /** 打开菜单那一刻是否有选中内容，决定“复制”是否可用 */
   const [menuCanCopy, setMenuCanCopy] = useState(false)
+  /** 缩放提示文案，null 表示不显示（显示约 900ms 后自动隐藏） */
+  const [hudText, setHudText] = useState<string | null>(null)
+  /** 缩放提示的隐藏定时器，连续缩放时重置，保证提示不会中途闪断 */
+  const hudTimerRef = useRef<number | null>(null)
+
+  /**
+   * 显示缩放提示，并在约 900ms 后自动隐藏。
+   * @param text 提示文案，如“字号 16”“字号已复位”
+   * @returns 无
+   */
+  const showHud = useCallback((text: string): void => {
+    setHudText(text)
+    if (hudTimerRef.current !== null) window.clearTimeout(hudTimerRef.current)
+    hudTimerRef.current = window.setTimeout(() => {
+      hudTimerRef.current = null
+      setHudText(null)
+    }, HUD_HIDE_DELAY_MS)
+  }, [])
 
   /**
    * 复制选中内容到系统剪贴板，无选中时不动作。
@@ -195,6 +221,30 @@ function TerminalView({
     if (!term) return
     term.clear()
     term.focus()
+  }, [])
+
+  /**
+   * 右键菜单“放大字号”，与 Ctrl+= 走同一条链路（持久化 + 跨标签同步 + 重排）。
+   * @returns 无
+   */
+  const zoomIn = useCallback((): void => {
+    stepFontSize(1)
+  }, [])
+
+  /**
+   * 右键菜单“缩小字号”，与 Ctrl+- 等价。
+   * @returns 无
+   */
+  const zoomOut = useCallback((): void => {
+    stepFontSize(-1)
+  }, [])
+
+  /**
+   * 右键菜单“复位字号”，与 Ctrl+0 等价。
+   * @returns 无
+   */
+  const zoomReset = useCallback((): void => {
+    writeFontSize(DEFAULT_FONT_SIZE)
   }, [])
 
   /**
@@ -374,6 +424,36 @@ function TerminalView({
     activeRef.current = active
   }, [active])
 
+  // Ctrl+滚轮缩放：必须用捕获阶段且 passive: false，才能先于 xterm 的滚动处理并取消默认行为
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+
+    const handleWheel = (event: WheelEvent): void => {
+      // 没按 Ctrl 时一律不拦：xterm 照常滚屏、滚回滚缓冲
+      if (!event.ctrlKey) {
+        wheelAccRef.current = 0
+        return
+      }
+      // 阻止整页缩放与 xterm 的滚动：捕获阶段 stopPropagation 能挡住后续所有监听
+      event.preventDefault()
+      event.stopPropagation()
+      // 行/页为单位的滚轮换算成像素，保证同一阈值在不同输入设备下手感一致
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1
+      wheelAccRef.current += event.deltaY * unit
+      // 触控板会连发很小的 deltaY，累计到阈值才走一步，避免一次滑动跳好几级
+      if (Math.abs(wheelAccRef.current) < WHEEL_ZOOM_THRESHOLD) return
+      // 向上滚（deltaY 为负）放大，向下滚缩小
+      const delta = wheelAccRef.current < 0 ? 1 : -1
+      // 只扣掉一个阈值，余量留给下一次，连续滚动的手感更线性
+      wheelAccRef.current += delta * WHEEL_ZOOM_THRESHOLD
+      stepFontSize(delta)
+    }
+
+    host.addEventListener('wheel', handleWheel, { capture: true, passive: false })
+    return () => host.removeEventListener('wheel', handleWheel, { capture: true })
+  }, [])
+
   // 仅在激活状态下监听尺寸变化：隐藏容器的尺寸为 0，此时校准会得到非法行列数
   useEffect(() => {
     const host = hostRef.current
@@ -419,6 +499,23 @@ function TerminalView({
     return unsubscribe
   }, [sessionId, applyFontSize])
 
+  // 缩放提示：字号变化都经过 subscribeFontSize 广播，快捷键、Ctrl+滚轮、右键菜单、其它标签都能统一在这里提示
+  useEffect(() => {
+    const unsubscribe = subscribeFontSize((size) => {
+      // 非激活标签容器隐藏，不弹提示，免得切回来看到残留文案
+      if (!activeRef.current) return
+      showHud(size === DEFAULT_FONT_SIZE ? '字号已复位' : `字号 ${size}`)
+    })
+    return () => {
+      unsubscribe()
+      // 组件卸载时清掉未到点的定时器
+      if (hudTimerRef.current !== null) {
+        window.clearTimeout(hudTimerRef.current)
+        hudTimerRef.current = null
+      }
+    }
+  }, [showHud])
+
   // 主题切换（含跟随系统时系统偏好变化）时热更新终端配色：xterm 支持运行时替换 theme，
   // 但换完需要整屏重绘一次，否则已经画上去的字符仍是旧配色
   useEffect(() => {
@@ -457,10 +554,16 @@ function TerminalView({
           onPaste={pasteClipboard}
           onSelectAll={selectAll}
           onFind={openSearch}
+          onZoomIn={zoomIn}
+          onZoomOut={zoomOut}
+          onZoomReset={zoomReset}
           onClear={clearScreen}
           onClose={closeMenu}
         />
       )}
+
+      {/* 缩放提示：终端顶部居中，约 900ms 后由定时器移除 */}
+      {hudText && <div className="term-hud">{hudText}</div>}
     </div>
   )
 }

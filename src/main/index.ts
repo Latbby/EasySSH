@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow } from 'electron'
+import { app, shell, BrowserWindow, Menu } from 'electron'
 import { appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
@@ -157,6 +157,11 @@ function createWindow(): void {
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
   log('app ready')
+
+  // 去掉 Electron 的默认菜单：它自带的 View→Zoom 加速键会把 Ctrl+= / Ctrl+- / Ctrl+滚轮
+  // 抢去缩放整个页面（界面发虚、终端字号反而不变），而本应用要的是「只缩放终端字号」。
+  // 去掉菜单后这些按键完整交给渲染进程；输入框的复制粘贴由 Chromium 原生处理，不受影响。
+  Menu.setApplicationMenu(null)
 
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
