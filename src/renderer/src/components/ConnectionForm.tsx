@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import type { AuthType, ConnectionVO, SaveConnectionDTO } from '@shared/types'
 import { toMessage } from '../utils'
 import { useFocusTrap } from '../useFocusTrap'
+import Icon from './Icon'
 
 interface Props {
   /** 编辑时传入已有连接，新增时为空 */
@@ -29,6 +30,8 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
   const [host, setHost] = useState(initial?.host ?? '')
   const [port, setPort] = useState(String(initial?.port ?? 22))
   const [username, setUsername] = useState(initial?.username ?? '')
+  // 分组名可留空，空串表示未分组
+  const [group, setGroup] = useState(initial?.group ?? '')
   const [authType, setAuthType] = useState<AuthType>(initial?.authType ?? 'password')
   // 密码与口令永不回填，只以"留空即不修改"的语义提交
   const [password, setPassword] = useState('')
@@ -75,6 +78,8 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
         port: portNumber,
         username: username.trim(),
         authType,
+        // 分组名两端空白无意义，空串即「未分组」，由 store 统一归一化
+        group: group.trim(),
         privateKeyPath: authType === 'privateKey' ? privateKeyPath.trim() || undefined : undefined,
         // 留空的凭据不提交，避免编辑连接时误清空已保存的密码
         // 勾选「清除已保存的凭据」后提交空串即清除语义，密码与私钥口令一并清掉
@@ -143,6 +148,15 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
           </label>
 
           <label className="field">
+            <span>分组</span>
+            <input
+              value={group}
+              onChange={(event) => setGroup(event.target.value)}
+              placeholder="留空表示未分组"
+            />
+          </label>
+
+          <label className="field">
             <span>认证方式</span>
             <select
               value={authType}
@@ -180,7 +194,8 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
                     onChange={(event) => setPrivateKeyPath(event.target.value)}
                     placeholder="~/.ssh/id_ed25519"
                   />
-                  <button type="button" onClick={pickPrivateKey}>
+                  <button type="button" title="选择私钥文件" onClick={pickPrivateKey}>
+                    <Icon name="folder" size={14} />
                     选择
                   </button>
                 </div>

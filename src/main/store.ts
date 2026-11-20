@@ -20,6 +20,8 @@ interface StoredConnection {
   secret?: string
   /** 加密后的私钥口令 */
   secretPassphrase?: string
+  /** 分组名，字段缺失表示未分组 */
+  group?: string
   createdAt: number
 }
 
@@ -103,7 +105,8 @@ function toVO(row: StoredConnection): ConnectionVO {
     authType: row.authType,
     privateKeyPath: row.privateKeyPath,
     hasCredential: Boolean(row.secret || row.secretPassphrase),
-    createdAt: row.createdAt
+    createdAt: row.createdAt,
+    group: row.group
   }
 }
 
@@ -170,6 +173,8 @@ export function saveConnection(dto: SaveConnectionDTO): ConnectionVO {
     username: dto.username,
     authType: dto.authType,
     privateKeyPath: dto.privateKeyPath,
+    // 分组名两端空白没有意义，空串统一按未分组处理（不写字段）
+    group: dto.group?.trim() || undefined,
     createdAt: exists?.createdAt ?? Date.now(),
     // undefined 表示本次未修改凭据，沿用旧值；空串则表示清除
     secret: dto.password === undefined ? exists?.secret : encrypt(dto.password),
@@ -189,4 +194,24 @@ export function saveConnection(dto: SaveConnectionDTO): ConnectionVO {
  */
 export function removeConnection(id: string): void {
   persist(load().filter((item) => item.id !== id))
+}
+
+/**
+ * 批量调整连接所属分组。
+ * @param ids 目标连接 id 列表，未命中的 id 直接忽略
+ * @param group 目标分组名，空串表示移出分组
+ * @returns 调整后的全部连接出参，便于调用方直接刷新列表
+ */
+export function assignGroup(ids: string[], group: string): ConnectionVO[] {
+  const target = group.trim()
+  const wanted = new Set(ids)
+  const list = load()
+  list.forEach((item) => {
+    if (!wanted.has(item.id)) return
+    // 移出分组时删除字段而不是写空串，避免磁盘上留下无意义的分组名
+    if (target) item.group = target
+    else delete item.group
+  })
+  persist(list)
+  return list.map(toVO)
 }

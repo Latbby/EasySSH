@@ -1,4 +1,5 @@
 import type { AppToast } from '../types'
+import Icon from './Icon'
 
 interface Props {
   /** 待展示的提示，kind 决定配色 */
@@ -26,13 +27,15 @@ function Toast({ toast, onClose }: Props): React.JSX.Element {
       <button
         type="button"
         className="toast-close"
+        title="关闭提示"
+        aria-label="关闭提示"
         onClick={(event) => {
           // 阻止冒泡，否则根元素的点击会再触发一次关闭
           event.stopPropagation()
           onClose()
         }}
       >
-        ×
+        <Icon name="close" size={14} />
       </button>
     </div>
   )
