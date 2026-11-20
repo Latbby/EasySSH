@@ -12,6 +12,9 @@
  *   8. SFTP 路径栏：打开面板后可编辑跳转目录
  *   9. Toast：失败操作出现带分级类名的提示，点击可关闭
  *  10. 主机密钥变更：换掉服务端密钥后弹窗展示真实新旧指纹，确认信任后重连成功
+ *  11. 本轮新增功能（见文件内 12.x / 15 编号）：主题切换与终端配色跟随、连接分组折叠与移动、
+ *      导入导出入口与 window.api 链路、SFTP 列宽拖拽、2000 行大目录虚拟滚动、
+ *      远程编辑入口与失败提示、端口转发面板启停一条 local 规则、会话恢复提示条与恢复动作
  *
  * 注意：脚本优先使用 dist/win-unpacked 下的打包产物，若该产物早于本轮源码改动，
  * 新增用例会因为跑的是旧代码而失败；验证新代码前请先把 dist 目录改名让脚本回退到 out/ 开发态。
@@ -25,6 +28,7 @@ const { Server, Client, utils } = require('ssh2')
 const { spawn, spawnSync } = require('child_process')
 const { createHash } = require('crypto')
 const fs = require('fs')
+const net = require('net')
 const os = require('os')
 const path = require('path')
 const { generateHostKey } = require('./host-key.cjs')
@@ -35,6 +39,10 @@ const CDP_PORT = 9333
 const LOG_FILE = path.join(PROJECT_ROOT, 'e2e-electron.log')
 /** 假想目标机的 home 目录，与内存文件系统保持一致 */
 const FAKE_HOME = '/home'
+/** 端口转发用例使用的本地监听端口（避开仓库默认的 2222/9333 与 ui-shot 的 2323/9455） */
+const FORWARD_TUNNEL_PORT = 15210
+/** 大目录用例的文件数量：验证虚拟滚动不会把 2000 行都塞进 DOM */
+const MANY_FILES = 2000
 
 /** 使用临时 userData 目录，避免污染真实用户配置 */
 const USER_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-client-e2e-'))
@@ -48,6 +56,49 @@ let passed = 0
 function pass(message) {
   passed += 1
   console.log(`[通过] ${message}`)
+}
+
+/**
+ * 断言条件成立，不成立直接抛错（退出码非零）。
+ * @param {boolean} condition 条件
+ * @param {string} message 描述
+ */
+function assert(condition, message) {
+  if (!condition) throw new Error(`断言失败：${message}`)
+  pass(message)
+}
+
+/**
+ * 取 DOM 表达式的结果，失败时返回 null（用于页面重新加载这种上下文会短暂失效的场景）。
+ * @param {ReturnType<typeof connectCdp>} cdp CDP 客户端
+ * @param {string} expression 表达式
+ * @returns {Promise<any>} 结果或 null
+ */
+async function tryEvaluate(cdp, expression) {
+  try {
+    return await cdp.evaluate(expression)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 轮询等待条件成立，容忍 CDP 的瞬时失败（页面重新加载期间执行上下文会被替换）。
+ * @param {ReturnType<typeof connectCdp>} cdp CDP 客户端
+ * @param {string} expression 返回布尔值的表达式
+ * @param {string} label 描述
+ * @param {number} timeout 超时毫秒数
+ */
+async function waitForTolerant(cdp, expression, label, timeout = 20000) {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    if (await tryEvaluate(cdp, expression)) {
+      pass(label)
+      return
+    }
+    await sleep(200)
+  }
+  throw new Error(`等待超时：${label}`)
 }
 
 /**
@@ -75,6 +126,14 @@ memfs.set('/', { type: 'dir' })
 memfs.set(FAKE_HOME, { type: 'dir' })
 memfs.set(`${FAKE_HOME}/readme.txt`, { type: 'file', content: Buffer.from('hello sftp') })
 memfs.set('/root-file.txt', { type: 'file', content: Buffer.from('root level file') })
+// 大目录：虚拟滚动用例需要一个 2000 项的目录，页面上只应渲染其中一小部分行
+memfs.set(`${FAKE_HOME}/many`, { type: 'dir' })
+for (let index = 0; index < MANY_FILES; index += 1) {
+  memfs.set(`${FAKE_HOME}/many/f-${String(index).padStart(4, '0')}.txt`, {
+    type: 'file',
+    content: Buffer.from(`file ${index}`)
+  })
+}
 
 /**
  * 规范化远程路径。
@@ -346,6 +405,21 @@ function startTestServer(hostKey) {
         // SFTP 面板用例需要真实 sftp 子系统
         session.on('sftp', (acceptSftp) => serveSftp(acceptSftp()))
       })
+
+      // 端口转发用例需要 direct-tcpip：服务端按请求的目标端口真实连过去
+      // 注意服务端侧的事件名是 'tcpip'（客户端侧才叫 'tcp connection'）
+      client.on('tcpip', (accept, reject, info) => {
+        const target = net.connect({ host: '127.0.0.1', port: info.destPort })
+        target.once('connect', () => {
+          const channel = accept()
+          channel.pipe(target).pipe(channel)
+          channel.on('close', () => target.destroy())
+        })
+        target.once('error', () => {
+          reject()
+          target.destroy()
+        })
+      })
     })
   })
   return listenOnTestPort(server)
@@ -404,6 +478,71 @@ function closeServer(server) {
       }
     }
     setTimeout(finish, 1000)
+  })
+}
+
+/**
+ * 启动一个本地回显服务，作为端口转发用例的隧道目标。
+ * @returns {Promise<{port: number, close: () => Promise<void>}>} 服务句柄
+ */
+function startEchoService() {
+  const server = net.createServer((socket) => {
+    socket.write('E2E-TARGET-HELLO\n')
+    socket.on('data', (chunk) => socket.write(chunk))
+    socket.on('error', () => socket.destroy())
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve({
+        port: server.address().port,
+        close: () => new Promise((done) => server.close(() => done()))
+      })
+    })
+  })
+}
+
+/**
+ * 探测端口能否重新绑定，用于验证转发规则停止后端口真的释放。
+ * @param {number} port 端口
+ * @returns {Promise<boolean>} 是否可监听
+ */
+function tryListen(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer()
+    probe.once('error', () => resolve(false))
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)))
+  })
+}
+
+/**
+ * 通过隧道端口做一次请求-应答，确认数据真的穿过了 SSH 通道。
+ * @param {number} port 本地监听端口
+ * @param {string} payload 待发送文本
+ * @param {number} timeout 超时毫秒数
+ * @returns {Promise<string>} 收到的全部文本
+ */
+function exchangeThroughTunnel(port, payload, timeout = 8000) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port })
+    const chunks = []
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(new Error(`隧道数据往返超时：${payload}`))
+    }, timeout)
+    socket.on('data', (chunk) => {
+      chunks.push(chunk)
+      const text = Buffer.concat(chunks).toString('utf8')
+      if (text.includes(payload)) {
+        clearTimeout(timer)
+        socket.end()
+        resolve(text)
+      }
+    })
+    socket.once('connect', () => socket.write(payload))
+    socket.once('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
   })
 }
 
@@ -632,6 +771,61 @@ window.__e2eUI = {
   },
   text(selector) {
     return (document.querySelector(selector) || {}).textContent || ''
+  },
+  // 当前可见的 SFTP / 终端面板内的元素：多个标签同时挂载，必须限定到激活的那个
+  visible(selector) {
+    return document.querySelector('.sftp-panel:not(.hidden) ' + selector) ||
+      document.querySelector('.terminal-host:not(.hidden) ' + selector)
+  },
+  // 端口转发表单：按字段名（label 里的首个 span 文案）设置输入框
+  setFwdField(labelText, value) {
+    const fields = Array.from(document.querySelectorAll('.fwd-form .fwd-field'))
+    const field = fields.find((item) => {
+      const span = item.querySelector('span')
+      return span && span.textContent.trim() === labelText
+    })
+    if (!field) throw new Error('未找到转发表单字段：' + labelText)
+    const input = field.querySelector('input')
+    if (!input) throw new Error('转发表单字段没有输入框：' + labelText)
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    return input.value
+  },
+  // 端口转发表单：按字段名设置下拉框（连接 / 类型）
+  setFwdSelect(labelText, optionValue) {
+    const fields = Array.from(document.querySelectorAll('.fwd-form .fwd-field'))
+    const field = fields.find((item) => {
+      const span = item.querySelector('span')
+      return span && span.textContent.trim() === labelText
+    })
+    if (!field) throw new Error('未找到转发表单下拉：' + labelText)
+    const select = field.querySelector('select')
+    if (!select) throw new Error('转发表单字段没有下拉框：' + labelText)
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(
+      select,
+      optionValue
+    )
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    return select.value
+  },
+  fwdStatus() {
+    const el = document.querySelector('.fwd-status')
+    return el ? el.textContent.trim() : ''
+  },
+  fwdText() {
+    return Array.from(document.querySelectorAll('.fwd-row'))
+      .map((el) => el.textContent.trim())
+      .join(' || ')
+  },
+  // 激活最后一个终端标签：新增用例会把激活标签切到 SFTP 面板，而屏幕文本只存在于可见终端里
+  activateLastTerminalTab() {
+    const tabs = Array.from(document.querySelectorAll('.tab')).filter((el) => {
+      const badge = el.querySelector('.tab-kind')
+      return badge && badge.textContent.trim() === '>_'
+    })
+    if (!tabs.length) throw new Error('没有终端标签')
+    tabs[tabs.length - 1].click()
+    return true
   }
 }
 true;
@@ -672,6 +866,9 @@ async function main() {
   const fingerprintA = fingerprintOf(hostKeyA)
   let server = await startTestServer(hostKeyA)
   console.log(`[信息] 测试 SSH 服务已启动 127.0.0.1:${SSH_PORT}（主机密钥 A 指纹 ${fingerprintA}）`)
+  // 端口转发用例的隧道目标：本地回显服务，数据穿出隧道后应当原样回来
+  const echo = await startEchoService()
+  console.log(`[信息] 隧道目标回显服务已启动 127.0.0.1:${echo.port}`)
 
   // 优先用打包产物验证：它最接近用户双击运行的真实形态
   const packagedExe = path.join(PROJECT_ROOT, 'dist', 'win-unpacked', 'ssh-client.exe')
@@ -1191,10 +1388,460 @@ async function main() {
     )
 
     // -----------------------------------------------------------------------
+    // 12.6 主题：点击切换浅 / 深色、终端配色跟随、localStorage 持久化、右键回到跟随系统
+    // -----------------------------------------------------------------------
+    const themeProbe = `JSON.stringify({
+      mode: window.localStorage.getItem('ssh-client:theme'),
+      theme: document.documentElement.dataset.theme,
+      colorScheme: document.documentElement.style.colorScheme,
+      systemDark: window.matchMedia('(prefers-color-scheme: dark)').matches,
+      terminal: (function () {
+        var host = document.querySelector('.terminal-host:not(.hidden)')
+        if (!host) return null
+        var xterm = host.querySelector('.xterm')
+        var viewport = host.querySelector('.xterm-viewport')
+        var rows = host.querySelector('.xterm-rows')
+        var spans = rows
+          ? Array.from(rows.querySelectorAll('span')).filter(function (el) {
+              return el.textContent.trim()
+            })
+          : []
+        var textColors = {}
+        spans.slice(0, 40).forEach(function (el) {
+          textColors[getComputedStyle(el).color] = true
+        })
+        return {
+          xtermBg: xterm ? getComputedStyle(xterm).backgroundColor : null,
+          xtermColor: xterm ? getComputedStyle(xterm).color : null,
+          viewportBg: viewport ? getComputedStyle(viewport).backgroundColor : null,
+          viewportInline: viewport ? viewport.style.backgroundColor : null,
+          rowsBg: rows ? getComputedStyle(rows).backgroundColor : null,
+          textColors: Object.keys(textColors)
+        }
+      })()
+    })`
+    const themeBefore = JSON.parse(await cdp.evaluate(themeProbe))
+    console.log(`[信息] 切换前主题现场：${JSON.stringify(themeBefore)}`)
+    // 用户从未显式选择过主题时 localStorage 为空，读取语义等价于 system，这里两者都接受
+    assert(
+      themeBefore.mode === null || themeBefore.mode === 'system',
+      `首次启动的主题模式为 system（localStorage=${JSON.stringify(themeBefore.mode)} 表示未显式选择）`
+    )
+    assert(
+      themeBefore.theme === (themeBefore.systemDark ? 'dark' : 'light'),
+      `跟随系统时 data-theme 等于系统偏好（${themeBefore.theme}，系统深色=${themeBefore.systemDark}）`
+    )
+    /** 各主题下终端应有的前景色（TerminalView.tsx 里的 LIGHT/DARK_TERMINAL_THEME.foreground） */
+    const TERMINAL_FOREGROUND = { dark: 'rgb(231, 234, 240)', light: 'rgb(31, 36, 48)' }
+
+    await cdp.evaluate(`window.__e2eUI.click('.theme-toggle')`)
+    const themeFlipped = JSON.parse(await cdp.evaluate(themeProbe))
+    const flippedExpected = themeBefore.theme === 'light' ? 'dark' : 'light'
+    assert(
+      themeFlipped.theme === flippedExpected && themeFlipped.mode === flippedExpected,
+      `点击主题按钮后在显式主题间切换并持久化（mode=${themeFlipped.mode}，data-theme=${themeFlipped.theme}）`
+    )
+    assert(
+      themeFlipped.colorScheme === flippedExpected,
+      `color-scheme 同步为 ${themeFlipped.colorScheme}（原生控件与滚动条跟随主题）`
+    )
+    const flippedColor = TERMINAL_FOREGROUND[flippedExpected]
+    assert(
+      JSON.stringify(themeFlipped.terminal).includes(flippedColor),
+      `终端配色跟随主题变为 ${flippedColor}（probe=${JSON.stringify(themeFlipped.terminal)}）`
+    )
+
+    await cdp.evaluate(`window.__e2eUI.click('.theme-toggle')`)
+    const themeBack = JSON.parse(await cdp.evaluate(themeProbe))
+    const backColor = TERMINAL_FOREGROUND[themeBefore.theme]
+    assert(
+      themeBack.theme === themeBefore.theme && themeBack.mode === themeBefore.theme,
+      `再次点击切回 ${themeBack.theme} 并持久化（mode=${themeBack.mode}）`
+    )
+    assert(
+      JSON.stringify(themeBack.terminal).includes(backColor),
+      `终端配色随第二次切换变为 ${backColor}（probe=${JSON.stringify(themeBack.terminal)}）`
+    )
+    assert(
+      JSON.stringify(themeBack.terminal) !== JSON.stringify(themeFlipped.terminal),
+      '两次切换之间终端配色现场确实发生变化（不是只换了页面令牌）'
+    )
+
+    await cdp.evaluate(`(() => {
+      const el = document.querySelector('.theme-toggle')
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }))
+      return true
+    })()`)
+    const themeSystem = JSON.parse(await cdp.evaluate(themeProbe))
+    assert(
+      themeSystem.mode === 'system' &&
+        themeSystem.theme === (themeSystem.systemDark ? 'dark' : 'light'),
+      `Shift+点击回到跟随系统（mode=${themeSystem.mode}，data-theme=${themeSystem.theme}）`
+    )
+    // 把主题固定为显式深色：后面的「重新加载」用例要验证主题持久化
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const current = JSON.parse(await cdp.evaluate(themeProbe))
+      if (current.mode === 'dark') break
+      await cdp.evaluate(`window.__e2eUI.click('.theme-toggle')`)
+    }
+    const themeDark = JSON.parse(await cdp.evaluate(themeProbe))
+    assert(themeDark.mode === 'dark', `主题已固定为显式深色，供重启持久化用例使用（mode=${themeDark.mode}）`)
+
+    // -----------------------------------------------------------------------
+    // 12.7 连接分组：移动到分组、分组标题出现、折叠与展开、IPC 回读
+    // -----------------------------------------------------------------------
+    await cdp.evaluate(`window.__e2eUI.click('.conn-item .icon-btn[title="移动到分组…"]')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '移动到分组'`,
+      '点击「移动到分组…」打开分组弹窗'
+    )
+    await cdp.evaluate(`window.__e2eUI.setField('分组名', 'E2E 分组')`)
+    await cdp.evaluate(`window.__e2eUI.click('.modal-foot button[type="submit"]')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '保存分组后弹窗关闭')
+    await waitForCondition(
+      cdp,
+      `Array.from(document.querySelectorAll('.conn-group-name')).some((el) => el.textContent === 'E2E 分组')`,
+      '侧栏出现分组标题「E2E 分组」'
+    )
+    const groupFromIpc = await cdp.evaluate(
+      `(async () => JSON.stringify((await window.api.connections.list()).map((vo) => [vo.name, vo.group ?? null])))()`
+    )
+    if (!groupFromIpc.includes('"E2E 分组"')) {
+      throw new Error(`分组未落盘，IPC 回读结果为 ${groupFromIpc}`)
+    }
+    pass(`分组经 store 落盘且 IPC 回读一致（${groupFromIpc}）`)
+
+    const itemsBeforeCollapse = await cdp.evaluate(`document.querySelectorAll('.conn-item').length`)
+    if (itemsBeforeCollapse < 2) {
+      throw new Error(`连接项不足，无法验证分组折叠（当前 ${itemsBeforeCollapse} 项）`)
+    }
+    await cdp.evaluate(`window.__e2eUI.clickByText('.conn-group-head', 'E2E 分组')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelectorAll('.conn-item').length === ${itemsBeforeCollapse - 1}`,
+      `折叠分组后该组连接从列表隐藏（${itemsBeforeCollapse} → ${itemsBeforeCollapse - 1} 项）`
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.conn-group-head', 'E2E 分组')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelectorAll('.conn-item').length === ${itemsBeforeCollapse}`,
+      '再次点击分组标题后展开，连接重新出现'
+    )
+
+    // -----------------------------------------------------------------------
+    // 12.8 导入 / 导出：入口按钮与 window.api 链路（原生文件对话框无法用 CDP 驱动）
+    // 文件级行为（解析、跳过、导出不含凭据）由 scripts/verify-config-io.cjs 用真实代码覆盖
+    // -----------------------------------------------------------------------
+    const importExport = JSON.parse(
+      await cdp.evaluate(
+        `JSON.stringify({
+          importButton: !!document.querySelector('.sidebar-actions button[title="从 OpenSSH 配置或 JSON 文件导入"]'),
+          exportButton: !!document.querySelector('.sidebar-actions button[title="导出全部连接（不含任何凭据）"]'),
+          importText: (document.querySelector('.sidebar-actions button[title="从 OpenSSH 配置或 JSON 文件导入"]') || {}).textContent,
+          exportText: (document.querySelector('.sidebar-actions button[title="导出全部连接（不含任何凭据）"]') || {}).textContent,
+          importFn: typeof window.api.connections.importFromFile,
+          exportFn: typeof window.api.connections.exportToFile,
+          assignGroupFn: typeof window.api.connections.assignGroup
+        })`
+      )
+    )
+    assert(
+      importExport.importButton && importExport.exportButton,
+      '侧栏存在「导入」「导出」入口按钮'
+    )
+    assert(
+      importExport.importText.includes('导入') && importExport.exportText.includes('导出'),
+      `入口按钮文案正确（${importExport.importText.trim()} / ${importExport.exportText.trim()}）`
+    )
+    assert(
+      importExport.importFn === 'function' &&
+        importExport.exportFn === 'function' &&
+        importExport.assignGroupFn === 'function',
+      'window.api.connections 上导入 / 导出 / 分组接口均可调用（预加载链路已接通）'
+    )
+    // 不点击这两个按钮：主进程会弹原生文件对话框，CDP 无法关闭它，会挂住后续用例
+    console.log('[信息] 导入导出的原生对话框未在 e2e 中触发，文件级行为由 verify-config-io.cjs 覆盖')
+
+    // -----------------------------------------------------------------------
+    // 12.9 SFTP 列宽拖拽：拖动改变列宽、表头与数据行对齐、最小宽度钳制、双击复位
+    // -----------------------------------------------------------------------
+    // 主机密钥变更用例重启过服务端，测试 9 打开的 SFTP 会话已随底层连接释放，
+    // 因此先关掉失效标签，再重新打开一个可用的 SFTP 面板（顺带验证标签关闭与重开）
+    const staleSftpTab = await cdp.evaluate(`(() => {
+      const tab = Array.from(document.querySelectorAll('.tab')).find((el) => {
+        const badge = el.querySelector('.tab-kind')
+        return badge && badge.textContent.trim() === '⇅'
+      })
+      if (!tab) return false
+      const close = tab.querySelector('.tab-icon')
+      if (close) close.click()
+      return true
+    })()`)
+    if (staleSftpTab) {
+      await waitForCondition(
+        cdp,
+        `document.querySelectorAll('.sftp-panel').length === 0`,
+        '关闭已被服务端重启带走的 SFTP 标签'
+      )
+    }
+    await cdp.evaluate(`window.__e2eUI.click('.conn-item .icon-btn[title="SFTP 文件管理"]')`)
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')`,
+      '重新打开 SFTP 面板（后续用例限定在可见面板内）'
+    )
+    const resizerShape = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const head = document.querySelector('.sftp-panel:not(.hidden) .sftp-head')
+          return JSON.stringify({
+            resizers: head.querySelectorAll('.col-resizer').length,
+            sizeWidth: head.querySelector('.col-size').style.width
+          })
+        })()`
+      )
+    )
+    assert(resizerShape.resizers === 3, `表头有 3 个列宽拖拽手柄（实际 ${resizerShape.resizers}）`)
+    assert(resizerShape.sizeWidth === '96px', `size 列初始宽度为 96px（实际 ${resizerShape.sizeWidth}）`)
+
+    /**
+     * 在可见 SFTP 表头上拖动第 index 个列宽手柄。
+     * @param {number} index 手柄序号
+     * @param {number} deltaX 水平位移
+     */
+    const dragResizer = (index, deltaX) =>
+      cdp.evaluate(`(() => {
+        const head = document.querySelector('.sftp-panel:not(.hidden) .sftp-head')
+        const resizer = head.querySelectorAll('.col-resizer')[${index}]
+        resizer.dispatchEvent(new MouseEvent('mousedown', {
+          bubbles: true, cancelable: true, clientX: 500, clientY: 100
+        }))
+        document.dispatchEvent(new MouseEvent('mousemove', {
+          bubbles: true, clientX: ${500 + deltaX}, clientY: 100
+        }))
+        document.dispatchEvent(new MouseEvent('mouseup', {
+          bubbles: true, clientX: ${500 + deltaX}, clientY: 100
+        }))
+        return true
+      })()`)
+
+    await dragResizer(1, 40)
+    const afterDrag = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const panel = document.querySelector('.sftp-panel:not(.hidden)')
+          const head = panel.querySelector('.sftp-head')
+          const row = panel.querySelector('.sftp-row.clickable')
+          return JSON.stringify({
+            headWidth: head.querySelector('.col-size').style.width,
+            rowWidth: row ? row.querySelector('.col-size').style.width : null
+          })
+        })()`
+      )
+    )
+    assert(
+      afterDrag.headWidth === '136px',
+      `向右拖动 40px 后 size 列宽为 136px（实际 ${afterDrag.headWidth}）`
+    )
+    assert(
+      afterDrag.rowWidth === afterDrag.headWidth,
+      `表头与数据行共用同一列宽，保持对齐（数据行 ${afterDrag.rowWidth}）`
+    )
+
+    await dragResizer(1, -1000)
+    const clamped = await cdp.evaluate(
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-head .col-size').style.width`
+    )
+    assert(clamped === '72px', `向左大幅拖动被钳制在该列最小宽度 72px（实际 ${clamped}）`)
+
+    await cdp.evaluate(`(() => {
+      const head = document.querySelector('.sftp-panel:not(.hidden) .sftp-head')
+      head.querySelectorAll('.col-resizer')[1].dispatchEvent(
+        new MouseEvent('dblclick', { bubbles: true, cancelable: true })
+      )
+      return true
+    })()`)
+    const reset = await cdp.evaluate(
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-head .col-size').style.width`
+    )
+    assert(reset === '96px', `双击手柄恢复默认列宽 96px（实际 ${reset}）`)
+
+    // -----------------------------------------------------------------------
+    // 12.10 SFTP 大目录虚拟滚动：2000 项目录只渲染窗口内的行
+    // -----------------------------------------------------------------------
+    await cdp.evaluate(
+      `window.__e2eUI.setUncontrolledValue('.sftp-panel:not(.hidden) .sftp-path-input', '${FAKE_HOME}/many')`
+    )
+    await cdp.evaluate(`window.__e2eUI.pressEnter('.sftp-panel:not(.hidden) .sftp-path-input')`)
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes('f-0000.txt')`,
+      `大目录（${MANY_FILES} 项）加载完成`
+    )
+    const virtualState = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const panel = document.querySelector('.sftp-panel:not(.hidden)')
+          const list = panel.querySelector('.sftp-list')
+          const spacers = panel.querySelectorAll('.sftp-virtual-spacer')
+          return JSON.stringify({
+            domRows: panel.querySelectorAll('.sftp-row.clickable').length,
+            spacerTop: spacers[0] ? spacers[0].style.height : null,
+            scrollHeight: list.scrollHeight,
+            clientHeight: list.clientHeight
+          })
+        })()`
+      )
+    )
+    assert(
+      virtualState.domRows > 0 && virtualState.domRows < 100,
+      `${MANY_FILES} 行目录只渲染 ${virtualState.domRows} 行 DOM（远小于 ${MANY_FILES}）`
+    )
+    assert(
+      virtualState.scrollHeight >= MANY_FILES * 32,
+      `虚拟列表用占位高度表达全部内容（scrollHeight=${virtualState.scrollHeight}，${MANY_FILES}×32px）`
+    )
+
+    const scrollPerf = JSON.parse(
+      await cdp.evaluate(`(async () => {
+        const panel = document.querySelector('.sftp-panel:not(.hidden)')
+        const list = panel.querySelector('.sftp-list')
+        const start = performance.now()
+        list.scrollTop = list.scrollHeight
+        let found = false
+        while (performance.now() - start < 3000) {
+          await new Promise(function (resolve) { requestAnimationFrame(resolve) })
+          const rows = Array.from(panel.querySelectorAll('.sftp-row.clickable'))
+          if (rows.some(function (el) { return el.textContent.includes('f-1999.txt') })) {
+            found = true
+            break
+          }
+        }
+        return JSON.stringify({
+          elapsed: performance.now() - start,
+          found: found,
+          domRows: panel.querySelectorAll('.sftp-row.clickable').length
+        })
+      })()`)
+    )
+    assert(
+      scrollPerf.found === true,
+      `${MANY_FILES} 行目录滚动到底部后渲染出末尾文件 f-1999.txt（耗时 ${scrollPerf.elapsed.toFixed(1)}ms）`
+    )
+    assert(
+      scrollPerf.elapsed < 1500,
+      `滚动到底部的响应时间 ${scrollPerf.elapsed.toFixed(1)}ms 低于 1500ms 阈值`
+    )
+    assert(
+      scrollPerf.domRows < 100,
+      `滚动后 DOM 行数仍只有 ${scrollPerf.domRows} 行（虚拟滚动持续生效）`
+    )
+    console.log(
+      `[数据] 虚拟滚动：${MANY_FILES} 行目录滚动到底部耗时 ${scrollPerf.elapsed.toFixed(1)}ms，DOM 行数 ${scrollPerf.domRows}`
+    )
+
+    // -----------------------------------------------------------------------
+    // 12.11 远程编辑：入口按钮存在；远端文件读不到时面板给出可读中文提示
+    // （成功路径会用系统默认程序打开本地副本，在自动化环境里会真的拉起编辑器，故不触发）
+    // -----------------------------------------------------------------------
+    await cdp.evaluate(
+      `window.__e2eUI.setUncontrolledValue('.sftp-panel:not(.hidden) .sftp-path-input', '${FAKE_HOME}')`
+    )
+    await cdp.evaluate(`window.__e2eUI.pressEnter('.sftp-panel:not(.hidden) .sftp-path-input')`)
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes('readme.txt')`,
+      'SFTP 回到 /home 并列出 readme.txt'
+    )
+    assert(
+      await cdp.evaluate(
+        `!!document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/readme.txt"] .icon-btn[title="用系统程序编辑"]')`
+      ),
+      '远程编辑入口存在（每行都有「用系统程序编辑」按钮）'
+    )
+    // 从脚本侧删掉这个远端文件，模拟「面板列出来的文件已经不可读」
+    const readmeNode = memfs.get(`${FAKE_HOME}/readme.txt`)
+    memfs.delete(`${FAKE_HOME}/readme.txt`)
+    await cdp.evaluate(
+      `window.__e2eUI.click('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/readme.txt"] .icon-btn[title="用系统程序编辑"]')`
+    )
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-message')?.textContent ?? '').includes('readme.txt')`,
+      '远端文件不可读时面板给出针对该文件的提示'
+    )
+    const editMessage = await cdp.evaluate(
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-message').textContent`
+    )
+    assert(
+      /[\u4e00-\u9fff]/.test(editMessage) && editMessage.includes('readme.txt'),
+      `远程编辑失败提示已中文化且指明文件（${editMessage}）`
+    )
+    memfs.set(`${FAKE_HOME}/readme.txt`, readmeNode)
+
+    // -----------------------------------------------------------------------
+    // 12.12 端口转发面板：启动一条 local 规则、真实穿透隧道、停止后端口释放
+    // -----------------------------------------------------------------------
+    await cdp.evaluate(`window.__e2eUI.click('.sidebar-actions button[title="端口转发"]')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '端口转发'`,
+      '点击「隧道」打开端口转发面板'
+    )
+    await cdp.evaluate(
+      `window.__e2eUI.setFwdSelect('连接', ${JSON.stringify(saved.id)})`
+    )
+    await cdp.evaluate(`window.__e2eUI.setFwdSelect('类型', 'local')`)
+    await cdp.evaluate(`window.__e2eUI.setFwdField('本地监听端口', '${FORWARD_TUNNEL_PORT}')`)
+    await cdp.evaluate(`window.__e2eUI.setFwdField('目标地址（远端可达）', '127.0.0.1')`)
+    await cdp.evaluate(`window.__e2eUI.setFwdField('目标端口', '${echo.port}')`)
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-actions button', '启动转发')`)
+    await waitForCondition(
+      cdp,
+      `window.__e2eUI.fwdStatus() === '运行中'`,
+      '启动后规则状态为「运行中」'
+    )
+    const tunnelText = await exchangeThroughTunnel(
+      FORWARD_TUNNEL_PORT,
+      'E2E-本地转发中文往返'
+    )
+    assert(
+      tunnelText.includes('E2E-TARGET-HELLO') && tunnelText.includes('E2E-本地转发中文往返'),
+      `隧道双向数据完整（收到 ${JSON.stringify(tunnelText.trim())}）`
+    )
+    await waitForCondition(
+      cdp,
+      `window.__e2eUI.fwdText().includes('连接 1')`,
+      '面板累计连接数变为 1（隧道确实在工作）'
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.fwd-actions button', '停止')`)
+    await waitForCondition(
+      cdp,
+      `window.__e2eUI.fwdStatus() === '已停止'`,
+      '点击「停止」后规则状态变为「已停止」'
+    )
+    let released = false
+    for (let attempt = 0; attempt < 20 && !released; attempt += 1) {
+      released = await tryListen(FORWARD_TUNNEL_PORT)
+      if (!released) await sleep(100)
+    }
+    assert(released, `停止后本地监听端口 ${FORWARD_TUNNEL_PORT} 已释放（可以重新绑定）`)
+    await cdp.evaluate(`window.__e2eUI.click('.modal-foot button')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '关闭端口转发面板')
+
+    // -----------------------------------------------------------------------
     // 13. 终端搜索：Ctrl+F 展开搜索栏，命中计数随关键词变化
     // 放在最后执行：搜索栏一旦因产品缺陷不可用，不会挡住前面的用例取证
     // -----------------------------------------------------------------------
     const searchMarker = 'E2E-SEARCH-MARKER-2026'
+    // 新增用例结束在 SFTP 标签上，先切回终端标签，搜索栏与屏幕文本都只针对可见终端
+    await cdp.evaluate(`window.__e2eUI.activateLastTerminalTab()`)
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.terminal-host:not(.hidden) .xterm-rows')`,
+      '切回终端标签（搜索用例需要可见终端）'
+    )
     const searchSessionId = await cdp.evaluate(`window.__e2eUI.lastSessionId()`)
     if (!searchSessionId) throw new Error('未能定位当前终端会话，无法准备搜索用例的文本')
     await cdp.evaluate(
@@ -1285,12 +1932,169 @@ async function main() {
     }
     pass(`渲染根节点保持挂载（内容长度 ${rootState.根节点内容长度}）`)
 
+    // -----------------------------------------------------------------------
+    // 15. 会话恢复：写入快照后重新加载页面，验证提示条、恢复动作、主题持久化与忽略
+    // 放在最后执行：重新加载会重建执行上下文，前面的用例必须已经跑完
+    // -----------------------------------------------------------------------
+    const sessionFile = path.join(USER_DATA_DIR, 'session.json')
+    // 等过 App 的 800ms 防抖写入窗口，避免它把下面这份快照覆盖掉
+    await sleep(1200)
+    const snapshotSave = `(async () => {
+      await window.api.session.save({
+        tabs: [{ kind: 'terminal', connectionId: ${JSON.stringify(saved.id)} }],
+        savedAt: Date.now()
+      })
+      return true
+    })()`
+    await cdp.evaluate(snapshotSave)
+    const snapshotOnDisk = JSON.parse(fs.readFileSync(sessionFile, 'utf8'))
+    assert(
+      snapshotOnDisk.tabs.length === 1 &&
+        snapshotOnDisk.tabs[0].kind === 'terminal' &&
+        snapshotOnDisk.tabs[0].connectionId === saved.id,
+      `会话快照已落盘且只含类型与连接 id（${JSON.stringify(snapshotOnDisk.tabs)}）`
+    )
+    if (JSON.stringify(snapshotOnDisk).includes('s3cret-pw')) {
+      throw new Error('会话快照里出现了凭据内容')
+    }
+    pass('会话快照不含任何凭据')
+
+    /** 重新加载页面并在需要时重建 CDP 连接 */
+    const reloadAndRemount = async (label) => {
+      try {
+        await cdp.evaluate(`location.reload()`)
+      } catch {
+        // reload 会让当前执行上下文立即失效，这里忽略掉是预期行为
+      }
+      await sleep(500)
+      if (!(await tryEvaluate(cdp, `!!document.querySelector('.sidebar-title')`))) {
+        // 调试会话随上下文失效时重新连一次，避免后续用例无声失败
+        const wsUrl = await waitForPage(20000, () => child.exitCode)
+        cdp.close()
+        cdp = await connectCdp(wsUrl)
+        await cdp.prepareFocus()
+      }
+      await waitForTolerant(
+        cdp,
+        `document.querySelector('.sidebar-title')?.textContent === '连接'`,
+        label
+      )
+      await cdp.evaluate(PAGE_HELPERS)
+      // 重新加载后页面是全新的，未捕获异常收集器需要重新挂上
+      await cdp.evaluate(
+        `window.__e2eErrors = []; window.addEventListener('error', (event) => window.__e2eErrors.push(String(event.message))); true`
+      )
+    }
+
+    await reloadAndRemount('重新加载后应用重新挂载（会话恢复场景）')
+    await waitForCondition(
+      cdp,
+      `document.documentElement.dataset.theme === 'dark' && window.localStorage.getItem('ssh-client:theme') === 'dark'`,
+      '重新加载后主题仍按持久化值生效（localStorage 持久化）'
+    )
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.status-bar .status-btn.primary-btn')`,
+      '启动时出现会话恢复提示条（含「恢复」按钮）'
+    )
+    const restoreSummary = await cdp.evaluate(`document.querySelector('.status-text').textContent`)
+    assert(
+      restoreSummary.includes('上次有 1 个会话') && restoreSummary.includes('终端 1 / 文件 0'),
+      `提示条按类型统计上次会话（${restoreSummary}）`
+    )
+    const restoreSources = await cdp.evaluate(
+      `document.querySelectorAll('.status-bar .status-text')[1].textContent`
+    )
+    assert(
+      restoreSources.includes('E2E 测试机'),
+      `提示条列出会话来源连接名（${restoreSources}）`
+    )
+
+    await cdp.evaluate(`window.__e2eUI.clickByText('.status-actions button', '恢复')`)
+    await waitForCondition(
+      cdp,
+      `window.__e2eUI.tabs().some((title) => title.includes('E2E 测试机'))`,
+      '点击「恢复」后重开了上次的终端标签'
+    )
+    await waitForCondition(
+      cdp,
+      `window.__e2eUI.screenText().includes('E2E-欢迎使用测试 SSH 服务')`,
+      '恢复出来的终端收到远端欢迎语（会话真实可用）'
+    )
+    await waitForCondition(
+      cdp,
+      `!document.querySelector('.status-bar .status-btn')`,
+      '恢复完成后提示条自动消失'
+    )
+    assert(!fs.existsSync(sessionFile), '恢复后快照被清除，下次启动不再追问')
+
+    // 15.b 忽略路径：再写一份快照并重新加载，点「忽略」应当清掉快照
+    // 先等过 App 的 800ms 防抖写入窗口，避免它把下面这份快照覆盖掉（否则用例会随机失败）
+    await sleep(1200)
+    const sftpSnapshot = `(async () => {
+      await window.api.session.save({
+        tabs: [{ kind: 'sftp', connectionId: ${JSON.stringify(saved.id)} }],
+        savedAt: Date.now()
+      })
+      return true
+    })()`
+    await cdp.evaluate(sftpSnapshot)
+    const sftpSnapshotOnDisk = JSON.parse(fs.readFileSync(sessionFile, 'utf8'))
+    assert(
+      sftpSnapshotOnDisk.tabs.length === 1 && sftpSnapshotOnDisk.tabs[0].kind === 'sftp',
+      `第二次会话快照已落盘（${JSON.stringify(sftpSnapshotOnDisk.tabs)}）`
+    )
+    await reloadAndRemount('第二次重新加载后应用重新挂载（忽略路径）')
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.status-bar .status-btn')`,
+      '第二次启动同样出现会话恢复提示条'
+    )
+    const sftpSummary = await cdp.evaluate(`document.querySelector('.status-text').textContent`)
+    assert(
+      sftpSummary.includes('终端 0 / 文件 1'),
+      `提示条按类型统计 SFTP 标签（${sftpSummary}）`
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.status-actions button', '忽略')`)
+    await waitForCondition(
+      cdp,
+      `!document.querySelector('.status-bar .status-btn')`,
+      '点「忽略」后提示条消失'
+    )
+    await waitForCondition(
+      cdp,
+      `(async () => (await window.api.session.load()) === null)()`,
+      '忽略后快照被真实清除（IPC 读回 null）'
+    )
+
+    // 16. 重新加载后的收尾检查：无未捕获异常、根节点未卸载
+    const errorsAfterReload = await cdp.evaluate(`JSON.stringify(window.__e2eErrors)`)
+    if (errorsAfterReload !== '[]') {
+      throw new Error(`会话恢复流程（含页面重新加载）出现未捕获异常：${errorsAfterReload}`)
+    }
+    pass('会话恢复流程（含两次页面重新加载）全程无未捕获异常')
+    const rootAfterReload = JSON.parse(
+      await cdp.evaluate(
+        `JSON.stringify({
+          应用仍挂载: !!document.querySelector('.app'),
+          根节点内容长度: (document.getElementById('root') || {}).innerHTML
+            ? document.getElementById('root').innerHTML.length
+            : 0
+        })`
+      )
+    )
+    if (!rootAfterReload.应用仍挂载 || rootAfterReload.根节点内容长度 === 0) {
+      throw new Error(`重新加载后渲染根节点被卸载：${JSON.stringify(rootAfterReload)}`)
+    }
+    pass(`重新加载后根节点仍挂载（内容长度 ${rootAfterReload.根节点内容长度}）`)
+
     console.log(`\n[结果] 全部通过，共 ${passed} 项`)
   } finally {
     if (cdp) cdp.close()
     // Electron 会派生多个子进程，按进程树强制结束
     spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
     await closeServer(server)
+    if (echo) await echo.close()
     await sleep(500)
     fs.rmSync(USER_DATA_DIR, { recursive: true, force: true })
   }
