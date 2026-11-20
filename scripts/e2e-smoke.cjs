@@ -1006,7 +1006,7 @@ async function main() {
     pass('未确认前 known_hosts.json 仍保存旧指纹，没有静默信任')
 
     // 11.x 用户先取消弹窗：待确认记录仍然存在，随后用于验证「服务端下线不得误报密钥变更」
-    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-actions button', '取消连接')`)
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消连接')`)
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '取消连接后弹窗关闭')
     if (JSON.parse(fs.readFileSync(knownHostsFile, 'utf8'))[`127.0.0.1:${SSH_PORT}`] !== fingerprintA) {
       throw new Error('取消连接后 known_hosts.json 被改写，取消不应产生任何持久化副作用')
@@ -1054,7 +1054,7 @@ async function main() {
     }
     pass('再次弹出的弹窗仍展示服务端 B 的真实指纹')
 
-    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-actions button', '信任新密钥并连接')`)
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '信任新密钥并连接')`)
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '确认信任后弹窗关闭')
     await waitForCondition(
       cdp,
@@ -1142,7 +1142,7 @@ async function main() {
       throw new Error(`复制连接的草稿名称不符合预期：${draftName}`)
     }
     pass(`复制连接生成草稿（名称=${draftName}）`)
-    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-actions button', '取消')`)
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消')`)
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '取消后新建表单关闭')
 
     // 12.4 终端右键菜单：出现完整菜单项，Esc 可关闭

@@ -53,6 +53,29 @@ npm run lint         # ESLint
 npm run typecheck    # 类型检查
 ```
 
+## 界面设计
+
+界面样式集中在 `src/renderer/src/assets/main.css`，分为「设计令牌 → 基础元素 → 应用骨架 →
+侧边栏 → 工作区标签 → 终端 → SFTP → 弹窗 → 提示」若干段，组件样式只引用令牌，不写死颜色与间距。
+
+- **颜色**：一套暗色表面层级（`--bg-app` → `--bg-sidebar` → `--bg-surface` → `--bg-raised`）
+  加主题色与语义色（`--accent` / `--success` / `--warning` / `--danger` 及各 `-soft` 变体）。
+  只提供暗色主题：终端场景下暗色是主流选择，且能减少一套需要同步维护的配色。
+- **字号**：收敛为四档——11（快捷键等辅助等宽小字）/ 12（次要 UI 与说明）/ 13（正文与列表主名）/
+  14（区块与弹窗标题）。
+- **间距与圆角**：以 4px 为基本节奏（4/6/8/10/12/14/16/18/24），圆角分 `--radius-sm` 6px、
+  `--radius` 8px、`--radius-lg` 12px 三档。
+- **对比度**：正文与功能性次要文本均按 WCAG 正文标准（≥ 4.5:1）选定，`--text-faint` 即按此下限取值；
+  纯描边刻意保持低对比（1.2–1.4:1），以免暗色界面被线条切割得过于零碎。
+- **交互状态**：按钮、图标按钮、输入框、标签、列表行、菜单项都有 hover / active / `:focus-visible` /
+  disabled 四态；标签栏支持 ← → / Home / End 键盘导航（ARIA tabs 模式），弹窗有焦点陷阱、Esc 关闭，
+  关闭后焦点归还原处；悬停出现的行内操作按钮在键盘聚焦时同样出现；动效尊重
+  `prefers-reduced-motion`。
+- **视觉取证**：`npm run ui:shot` 用 CDP 驱动真实 Electron，把空状态、连接列表、终端、多标签、搜索、
+  右键菜单、SFTP、连接表单、提示条、窄窗口等状态截成固定命名的 PNG（输出在 `scripts/ui-shots/`，
+  已加入 `.gitignore`），便于改样式后快速比对。开发态若因完整性标签无法启动，可用环境变量
+  `E2E_ELECTRON_BIN` 指向 `node_modules/electron/dist` 的副本。
+
 ## 快捷键
 
 | 快捷键                        | 作用                                                             |
