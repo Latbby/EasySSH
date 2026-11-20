@@ -210,7 +210,8 @@ function entryIcon(entry: SftpEntryVO): IconName {
 
 /**
  * SFTP 文件面板：浏览远程目录，支持上传、下载、重命名、删除、新建目录与远程编辑。
- * 交互约定：单击选中、双击打开（目录进入、文件下载），选中后 Enter 打开、F5 刷新；
+ * 交互约定：单击选中，目录单击即进入，文件单击只选中、双击才下载；
+ * 选中后 Enter 打开、F5 刷新，上下键移动选中；
  * 路径栏可直接编辑跳转，本地面板内可拖拽文件到当前目录上传。
  * 表头三列可拖拽调整宽度，双击手柄恢复默认；列表按固定行高做虚拟滚动，只渲染可视行。
  * @param props 见 Props
@@ -445,7 +446,8 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
   }
 
   /**
-   * 打开目录项：目录进入，文件走保存框下载。双击或选中后按 Enter 触发。
+   * 打开目录项：目录进入，文件走保存框下载。
+   * 目录由单击触发，文件由双击或选中后按 Enter 触发。
    * @param entry 目录项
    */
   const openEntry = async (entry: SftpEntryVO): Promise<void> => {
@@ -791,6 +793,8 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault()
+              // 回车只跳转：不冒泡给面板级 Enter，否则会顺带打开当前选中的行（多跳一次或误下载）
+              event.stopPropagation()
               void submitPath()
             } else if (event.key === 'Escape') {
               // Esc 放弃编辑，还原成当前目录
@@ -888,13 +892,22 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
             className={`sftp-row clickable${selected === entry.path ? ' selected' : ''}`}
             key={entry.path}
             data-path={entry.path}
-            onClick={() => {
-              // 单击只负责选中，行内按钮与输入框会自行阻止冒泡
+            onClick={(event) => {
+              // 正在改名的行：点击只是把焦点交给输入框，不重新选中也不导航
+              if (renaming === entry.path) return
+              // 单击一律先选中，保证高亮与键盘操作的对象一致
               setSelected(entry.path)
+              if (entry.type !== 'directory') return
+              // 双击的第二次 click 带 detail=2，直接忽略：一次双击只进一层；
+              // 用点击序号而不是时间窗，用户快速连点两个不同目录不会被吞掉
+              if (event.detail > 1) return
+              void openEntry(entry)
             }}
             onDoubleClick={() => {
               // 正在改名的行不因双击触发打开
               if (renaming === entry.path) return
+              // 目录已经在单击时进入，双击不再重复导航，避免一次双击进两层
+              if (entry.type === 'directory') return
               void openEntry(entry)
             }}
           >
@@ -921,9 +934,11 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
               <button
                 className="col-name sftp-name"
                 style={cellStyle('name')}
-                // 只负责选中，双击交给行上的 onDoubleClick 统一处理，避免同一次双击打开两次
+                // 只负责选中，打开由行上的单击/双击统一处理，避免同一次点击触发两次
                 onClick={() => setSelected(entry.path)}
-                title={entry.type === 'directory' ? `进入 ${entry.name}` : `下载 ${entry.name}`}
+                title={
+                  entry.type === 'directory' ? `单击进入 ${entry.name}` : `双击下载 ${entry.name}`
+                }
               >
                 <span className="sftp-icon">
                   <Icon name={entryIcon(entry)} size={14} />
