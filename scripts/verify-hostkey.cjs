@@ -21,6 +21,7 @@ const Module = require('module')
 const os = require('os')
 const path = require('path')
 const ts = require('typescript')
+const { generateHostKeyPair } = require('./host-key.cjs')
 
 const HOST = '127.0.0.1'
 const SSH_PORT = 2222
@@ -298,8 +299,8 @@ async function main() {
   console.log(`[信息] 临时数据目录：${DATA_DIR}`)
 
   // 两把完全不同的主机密钥，分别充当“首次信任”与“变更后”的服务端身份
-  const keyA = utils.generateKeyPairSync('ed25519')
-  const keyB = utils.generateKeyPairSync('ed25519')
+  const keyA = generateHostKeyPair()
+  const keyB = generateHostKeyPair()
   const blobA = publicBlobOf(keyA.private)
   const blobB = publicBlobOf(keyB.private)
   const fpA = fingerprintOf(blobA)

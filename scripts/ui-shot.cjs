@@ -41,6 +41,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const zlib = require('zlib')
+const { generateHostKey } = require('./host-key.cjs')
 
 /** 仓库根目录 */
 const PROJECT_ROOT = path.resolve(__dirname, '..')
@@ -1675,7 +1676,7 @@ async function main() {
   }
 
   try {
-    server = await startTestServer(utils.generateKeyPairSync('ed25519').private)
+    server = await startTestServer(generateHostKey())
     console.log(`[信息] 测试 SSH 服务已启动 127.0.0.1:${SSH_PORT}`)
 
     logFd = fs.openSync(logFile, 'w')

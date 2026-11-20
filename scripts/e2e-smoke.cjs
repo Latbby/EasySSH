@@ -27,6 +27,7 @@ const { createHash } = require('crypto')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const { generateHostKey } = require('./host-key.cjs')
 
 const PROJECT_ROOT = path.resolve(__dirname, '..')
 const SSH_PORT = 2222
@@ -667,7 +668,7 @@ async function dumpScreenState(cdp) {
 
 async function main() {
   // 服务端主机密钥由脚本掌握，才能拿真实 SHA256 指纹去核对弹窗展示值
-  const hostKeyA = utils.generateKeyPairSync('ed25519').private
+  const hostKeyA = generateHostKey()
   const fingerprintA = fingerprintOf(hostKeyA)
   let server = await startTestServer(hostKeyA)
   console.log(`[信息] 测试 SSH 服务已启动 127.0.0.1:${SSH_PORT}（主机密钥 A 指纹 ${fingerprintA}）`)
@@ -974,7 +975,7 @@ async function main() {
     }
     pass('首次连接后 known_hosts.json 记录了主机 A 的真实 SHA256 指纹')
 
-    const hostKeyB = utils.generateKeyPairSync('ed25519').private
+    const hostKeyB = generateHostKey()
     const fingerprintB = fingerprintOf(hostKeyB)
     await closeServer(server)
     server = await startTestServer(hostKeyB)

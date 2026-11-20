@@ -9,6 +9,7 @@
  *   4. UTF-8 多字节字符按原始字节透传后能否完整还原（决定中文是否乱码）
  */
 const { Server, Client, utils } = require('ssh2')
+const { generateHostKey } = require('./host-key.cjs')
 
 const PORT = 2222
 const HOST = '127.0.0.1'
@@ -55,7 +56,7 @@ function waitFor(predicate, label, timeout = 5000) {
 
 /** 本地测试 SSH 服务，不做凭据校验，只负责回显 */
 function startTestServer() {
-  const hostKey = utils.generateKeyPairSync('ed25519').private
+  const hostKey = generateHostKey()
   const server = new Server({ hostKeys: [hostKey] }, (client) => {
     client.on('authentication', (ctx) => {
       // 测试服务不校验用户名密码，直接接受

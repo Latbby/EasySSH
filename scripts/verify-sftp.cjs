@@ -17,6 +17,7 @@ const Module = require('module')
 const os = require('os')
 const path = require('path')
 const ts = require('typescript')
+const { generateHostKey } = require('./host-key.cjs')
 
 const SSH_PORT = 2222
 const HOME = '/home'
@@ -292,7 +293,7 @@ const connectionStats = { opened: 0, closed: 0, active: 0 }
  * @returns {Promise<import('ssh2').Server>} 已监听的服务端
  */
 function startServer() {
-  const hostKey = utils.generateKeyPairSync('ed25519').private
+  const hostKey = generateHostKey()
   const server = new Server({ hostKeys: [hostKey] }, (client) => {
     connectionStats.opened += 1
     connectionStats.active += 1
