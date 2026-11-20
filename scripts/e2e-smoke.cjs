@@ -225,7 +225,10 @@ async function main() {
     if (!saved?.id) throw new Error('保存连接未返回 id')
     pass(`连接保存成功（id=${saved.id.slice(0, 8)}…）`)
 
-    const listJson = await cdp.evaluate(`JSON.stringify(await window.api.connections.list())`)
+    // Runtime.evaluate 的表达式不支持顶层 await，需要包一层 async IIFE 再配合 awaitPromise
+    const listJson = await cdp.evaluate(
+      `(async () => JSON.stringify(await window.api.connections.list()))()`
+    )
     if (listJson.includes('s3cret-pw')) throw new Error('列表出参泄漏了明文密码')
     if (listJson.includes('secret')) throw new Error('列表出参泄漏了密文字段')
     pass('连接列表出参未泄漏任何凭据字段')
@@ -249,11 +252,11 @@ async function main() {
     `)
 
     const sessionId = await cdp.evaluate(`
-      (await window.api.terminal.open({
+      (async () => (await window.api.terminal.open({
         connectionId: ${JSON.stringify(saved.id)},
         cols: 80,
         rows: 24
-      })).sessionId
+      })).sessionId)()
     `)
     if (!sessionId) throw new Error('打开终端未返回 sessionId')
     pass(`SSH 会话已建立（sessionId=${sessionId.slice(0, 8)}…）`)
