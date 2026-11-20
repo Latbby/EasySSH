@@ -65,6 +65,65 @@
   --duration: 120ms;
 }
 
+/* ==========================================================================
+   浅色主题：只覆盖令牌，组件样式一行都不用改
+   选择器用 [data-theme='light']，由 theme.ts 写到 <html> 上；
+   对比度同样按正文 ≥ 4.5:1 选取（--text-faint 在白色底上为 4.67:1）。
+   ========================================================================== */
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg-app: #f2f4f7;
+  --bg-sidebar: #e9ecf1;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-input: #ffffff;
+  --bg-hover: #e4e8ee;
+  --bg-active: #d8dee8;
+
+  --border-subtle: #d5dae3;
+  --border: #c3cad6;
+  --border-strong: #a9b2c1;
+
+  --text: #1f2430;
+  --text-muted: #444d5c;
+  --text-faint: #5d6675;
+
+  --accent: #3b6fd4;
+  --accent-strong: #2f5cba;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(59, 111, 212, 0.1);
+  /* 浅色下语义色要压深：它们会作为文字出现在各自的 -soft 底上，必须 ≥4.5:1 */
+  --success: #146c3a;
+  --success-soft: rgba(31, 143, 77, 0.12);
+  --warning: #6f4c05;
+  --warning-soft: rgba(154, 106, 8, 0.12);
+  --danger: #c3344e;
+  --danger-soft: rgba(195, 52, 78, 0.1);
+
+  --shadow-sm: 0 1px 2px rgba(22, 30, 45, 0.08);
+  --shadow-md: 0 8px 22px rgba(22, 30, 45, 0.12);
+  --shadow-lg: 0 18px 44px rgba(22, 30, 45, 0.16);
+  --ring: 0 0 0 3px rgba(59, 111, 212, 0.2);
+}
+
+/* 浅色主题下滚动条滑块必须换成深色，白色滑块在白底上等于不存在 */
+:root[data-theme='light'] *::-webkit-scrollbar-thumb {
+  background: rgba(31, 36, 48, 0.18);
+  background-clip: content-box;
+}
+
+:root[data-theme='light'] *::-webkit-scrollbar-thumb:hover {
+  background: rgba(31, 36, 48, 0.32);
+  background-clip: content-box;
+}
+
+/* 「已连接」行的悬停底色在浅色下要往亮里走，否则深底 + 深字读不出来 */
+:root[data-theme='light'] .conn-item.session-active {
+  --row-hover: #d3dceb;
+}
+
 /* ===== 基础元素 ===== */
 
 * {
@@ -797,7 +856,7 @@ input[type='checkbox'] {
 }
 
 .term-search-btn.active {
-  color: var(--accent);
+  color: var(--accent-strong);
   background: var(--accent-soft);
   border-color: rgba(109, 155, 255, 0.35);
 }
@@ -899,7 +958,8 @@ input[type='checkbox'] {
   margin: 0;
   padding: 8px 14px;
   font-size: 12px;
-  color: var(--accent);
+  /* 文字用更深的强调色：accent 落在 accent-soft 底上只有 4.2:1 */
+  color: var(--accent-strong);
   background: var(--accent-soft);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -1010,7 +1070,7 @@ input[type='checkbox'] {
 }
 
 .sftp-name:hover:not(:disabled) {
-  color: var(--accent);
+  color: var(--accent-strong);
   background: transparent;
   border: none;
 }
@@ -1064,7 +1124,8 @@ input[type='checkbox'] {
   justify-content: center;
   font-size: 13px;
   color: var(--text);
-  background: rgba(14, 16, 21, 0.86);
+  /* 用令牌而不是写死的深色：浅色主题下写死深色会让覆盖层文字几乎不可见 */
+  background: var(--bg-raised);
   border: 2px dashed var(--accent);
   border-radius: var(--radius-lg);
   pointer-events: none;
@@ -1183,7 +1244,8 @@ input[type='checkbox'] {
   gap: 8px;
   flex: 0 0 auto;
   padding: 12px 18px;
-  background: rgba(0, 0, 0, 0.14);
+  /* 用令牌而不是写死的黑色叠加：浅色主题下才不会发灰 */
+  background: var(--bg-sidebar);
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -1378,4 +1440,274 @@ input[type='checkbox'] {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* ===== 图标 ===== */
+
+/* 图标统一用 currentColor 描边，尺寸由使用处传入；block 避免基线间隙撑高行 */
+.icon {
+  display: block;
+  flex: 0 0 auto;
+}
+
+/* ===== 主题切换按钮 ===== */
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+.theme-toggle:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-raised);
+  border-color: var(--border);
+}
+
+/* ===== 连接分组 ===== */
+
+.conn-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.conn-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin-top: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+
+.conn-group-head:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+  border-color: transparent;
+}
+
+.conn-group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-group-count {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.conn-group-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+}
+
+/* ===== 侧栏操作行（导入 / 导出） ===== */
+
+.sidebar-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 0 12px 10px;
+}
+
+.sidebar-actions button {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+}
+
+.sidebar-actions button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* ===== 状态条上的操作按钮（会话恢复提示） ===== */
+
+.status-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.status-btn {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-raised);
+  border-color: var(--border);
+}
+
+.status-btn.primary-btn {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: transparent;
+}
+
+/* ===== SFTP 列宽拖拽手柄 ===== */
+
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 2;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  /* 命中区域 8px，但只在悬停时显示 2px 竖线，避免表头被切碎 */
+  background: transparent;
+}
+
+.col-resizer::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 3px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+}
+
+.col-resizer:hover::after,
+.col-resizer.dragging::after {
+  background: var(--accent);
+}
+
+.sftp-head .col-size,
+.sftp-head .col-time {
+  position: relative;
+}
+
+/* ===== 端口转发面板 ===== */
+
+.fwd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.fwd-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+
+.fwd-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.fwd-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fwd-desc {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fwd-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.fwd-status.running {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.fwd-status.error {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.fwd-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.fwd-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-faint);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+.fwd-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.fwd-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.fwd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
