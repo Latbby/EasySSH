@@ -60,7 +60,9 @@ function finish(code, summary) {
 
   // userData 里如果生成了配置文件，说明主进程已经跑到注册 IPC 之后了
   const dataFiles = fs.existsSync(userDataDir) ? fs.readdirSync(userDataDir) : []
-  console.log(`[userData 产物] ${dataFiles.length ? dataFiles.join('、') : '(空，主进程可能未完成初始化)'}`)
+  console.log(
+    `[userData 产物] ${dataFiles.length ? dataFiles.join('、') : '(空，主进程可能未完成初始化)'}`
+  )
 
   fs.rmSync(userDataDir, { recursive: true, force: true })
   fs.rmSync(logPath, { force: true })

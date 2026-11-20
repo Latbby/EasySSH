@@ -4,14 +4,14 @@
 
 ## 技术栈
 
-| 层 | 选型 | 说明 |
-| --- | --- | --- |
-| 壳 | Electron 44 | 三平台共用一套代码 |
-| 构建 | electron-vite 6 | 主进程 / preload / 渲染进程统一构建与热更新 |
-| 终端 | @xterm/xterm | 终端渲染、尺寸自适应、链接识别 |
-| SSH | ssh2 | 纯 JS 实现，同时支撑 shell 与 SFTP |
-| UI | React 19 | 连接列表、多标签工作区 |
-| 存储 | JSON + Electron safeStorage | 配置原子写盘，凭据加密存储 |
+| 层   | 选型                        | 说明                                        |
+| ---- | --------------------------- | ------------------------------------------- |
+| 壳   | Electron 44                 | 三平台共用一套代码                          |
+| 构建 | electron-vite 6             | 主进程 / preload / 渲染进程统一构建与热更新 |
+| 终端 | @xterm/xterm                | 终端渲染、尺寸自适应、链接识别              |
+| SSH  | ssh2                        | 纯 JS 实现，同时支撑 shell 与 SFTP          |
+| UI   | React 19                    | 连接列表、多标签工作区                      |
+| 存储 | JSON + Electron safeStorage | 配置原子写盘，凭据加密存储                  |
 
 ## 目录结构
 
@@ -107,7 +107,6 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
 
 本机开发环境若设置了 `ELECTRON_RUN_AS_NODE=1`，`electron.exe` 会退化成纯 Node 运行、
 无法启动图形界面，需要在该变量未设置的环境下启动应用或运行 `verify:e2e`。
-
 
 ## 运行环境要求（重要）
 
