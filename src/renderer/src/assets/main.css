@@ -291,7 +291,9 @@ input[type='checkbox'] {
 
 .app {
   display: grid;
-  grid-template-columns: 272px minmax(0, 1fr);
+  /* 侧栏宽度由渲染进程写到 --sidebar-width（可拖动调整，默认 300px），
+     中间 6px 是拖拽手柄列，右侧工作区自适应剩余宽度 */
+  grid-template-columns: var(--sidebar-width, 300px) 6px minmax(0, 1fr);
   height: 100%;
 }
 
@@ -300,7 +302,42 @@ input[type='checkbox'] {
   flex-direction: column;
   min-height: 0;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border-subtle);
+}
+
+/* 侧栏与工作区之间的拖拽手柄：平时是一条分隔线，悬停/拖动时变强调色 */
+.splitter {
+  position: relative;
+  z-index: 3;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.splitter::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border-subtle);
+  transition:
+    background var(--duration) ease,
+    width var(--duration) ease;
+}
+
+.splitter:hover::before,
+.splitter:focus-visible::before,
+.splitter.dragging::before {
+  width: 2px;
+  background: var(--accent);
+}
+
+/* 拖动期间禁止选中文本，并把光标保持为拖拽样式 */
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .sidebar-head {
@@ -777,6 +814,35 @@ input[type='checkbox'] {
 }
 
 /* ===== 终端：搜索栏与右键菜单 ===== */
+
+/* 缩放提示：调整字号时在终端顶部短暂显示当前档位，键盘与滚轮缩放都有反馈 */
+.term-hud {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 6;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  animation: hud-in 120ms ease-out;
+}
+
+@keyframes hud-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
 
 .term-search {
   position: absolute;

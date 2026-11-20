@@ -16,7 +16,50 @@ import { asHostKeyChanged, toMessage } from './utils'
 import type { AppTab, AppToast, TabSource, TerminalTab, ToastKind } from './types'
 
 /** 表单状态：新增（可带草稿，用于复制连接）、编辑或关闭 */
-type EditorState = { mode: 'new'; draft?: ConnectionVO } | { mode: 'edit'; vo: ConnectionVO } | null
+type EditorState =
+  | { mode: 'new'; draft?: ConnectionVO; inheritFrom?: string }
+  | { mode: 'edit'; vo: ConnectionVO }
+  | null
+
+/** 侧栏默认宽度（px）：比上一版的 272 更宽一些，长主机名不用挤 */
+const SIDEBAR_DEFAULT_WIDTH = 300
+/** 侧栏最小宽度 */
+const SIDEBAR_MIN_WIDTH = 240
+/** 侧栏最大宽度：为工作区保留 480px，再扣掉 6px 的分隔条列，窄窗口下也不会把终端压没 */
+const SIDEBAR_MAX_WIDTH = 560
+/** 工作区保底可用宽度（含分隔条） */
+const WORKSPACE_MIN_WIDTH = 486
+/** 侧栏宽度持久化键 */
+const SIDEBAR_WIDTH_KEY = 'ssh-client:sidebar-width'
+
+/**
+ * 当前窗口下侧栏允许的最大宽度。
+ * @returns 最大宽度（px）
+ */
+function sidebarMaxWidth(): number {
+  return Math.max(
+    SIDEBAR_MIN_WIDTH,
+    Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - WORKSPACE_MIN_WIDTH)
+  )
+}
+
+/**
+ * 把任意宽度收拢到合法区间。
+ * @param width 目标宽度
+ * @returns 收拢后的宽度
+ */
+function clampSidebarWidth(width: number): number {
+  return Math.min(Math.max(Math.round(width), SIDEBAR_MIN_WIDTH), sidebarMaxWidth())
+}
+
+/**
+ * 读取上次保存的侧栏宽度。
+ * @returns 合法宽度，缺失或非法时返回默认值
+ */
+function readSidebarWidth(): number {
+  const raw = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
+  return Number.isFinite(raw) && raw > 0 ? clampSidebarWidth(raw) : SIDEBAR_DEFAULT_WIDTH
+}
 
 /** 会话区状态：标签与激活项合并维护，避免出现激活项已被关闭的中间态 */
 interface SessionState {
@@ -89,6 +132,12 @@ function App(): React.JSX.Element {
   /** 上次退出时留下的会话快照，非空时显示恢复提示条 */
   const [restore, setRestore] = useState<SessionSnapshotVO | null>(null)
   const [restoring, setRestoring] = useState(false)
+  /** 侧栏宽度（px）：可拖动、可键盘微调，并持久化到 localStorage */
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => readSidebarWidth())
+  /** 是否正在拖动分隔条，仅用于切换拖动态样式 */
+  const [resizing, setResizing] = useState(false)
+  /** 拖动中的最新宽度：pointermove 里读 ref，避免高频 setState 依赖 */
+  const sidebarWidthRef = useRef(sidebarWidth)
 
   /** sessionId 到 xterm 写入函数，输出按会话精确分发，避免每个标签各自过滤全量数据 */
   const writers = useRef(new Map<string, (data: Uint8Array) => void>())
@@ -327,6 +376,81 @@ function App(): React.JSX.Element {
     .map((tab) => tab.source.connectionId)
     .filter((id): id is string => Boolean(id))
 
+  // 窗口变窄时把侧栏收拢回合法区间，避免工作区被压到不可用
+  useEffect(() => {
+    const onWindowResize = (): void => setSidebarWidth((prev) => clampSidebarWidth(prev))
+    window.addEventListener('resize', onWindowResize)
+    return () => window.removeEventListener('resize', onWindowResize)
+  }, [])
+
+  /**
+   * 应用并持久化侧栏宽度。
+   * @param width 目标宽度，会被收拢到合法区间
+   */
+  const applySidebarWidth = useCallback((width: number): void => {
+    const next = clampSidebarWidth(width)
+    sidebarWidthRef.current = next
+    setSidebarWidth(next)
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(next))
+  }, [])
+
+  /** 双击分隔条复位到默认宽度 */
+  const resetSidebarWidth = useCallback((): void => {
+    applySidebarWidth(SIDEBAR_DEFAULT_WIDTH)
+  }, [applySidebarWidth])
+
+  /**
+   * 开始拖动分隔条。
+   * @param event 指针事件
+   */
+  const startResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setResizing(true)
+    document.body.classList.add('resizing')
+  }
+
+  /**
+   * 拖动中实时更新宽度：侧栏贴着窗口左边，指针的 clientX 就是目标宽度。
+   * @param event 指针事件
+   */
+  const moveResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (!resizing) return
+    const next = clampSidebarWidth(event.clientX)
+    sidebarWidthRef.current = next
+    setSidebarWidth(next)
+  }
+
+  /**
+   * 结束拖动并落盘。
+   * @param event 指针事件
+   */
+  const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (!resizing) return
+    setResizing(false)
+    document.body.classList.remove('resizing')
+    event.currentTarget.releasePointerCapture?.(event.pointerId)
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidthRef.current))
+  }
+
+  /**
+   * 方向键微调侧栏宽度，Home 复位；Shift 加大步长。
+   * @param event 键盘事件
+   */
+  const resizeByKeyboard = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    const step = event.shiftKey ? 48 : 16
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      applySidebarWidth(sidebarWidth - step)
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      applySidebarWidth(sidebarWidth + step)
+    } else if (event.key === 'Home') {
+      event.preventDefault()
+      applySidebarWidth(SIDEBAR_DEFAULT_WIDTH)
+    }
+  }
+
   /**
    * 切换到相邻标签。
    * @param step 偏移量，+1 下一个、-1 上一个
@@ -425,15 +549,16 @@ function App(): React.JSX.Element {
   )
 
   /**
-   * 复制连接：打开一个不带走原凭据的新建表单草稿。
+   * 复制连接：用原配置打开一个新建表单草稿，并把已保存的凭据一并带过去。
    * @param vo 被复制的连接
    */
   const duplicateConnection = useCallback((vo: ConnectionVO): void => {
     const label = vo.name || `${vo.username}@${vo.host}`
     setEditor({
       mode: 'new',
-      // id 置空表示新增；hasCredential 置 false，避免提示“保留已保存的密码”造成误解
-      draft: { ...vo, id: '', name: `${label} 副本`, hasCredential: false }
+      // id 置空表示新增；凭据由表单从源连接读取回显，保存后副本即可直接连接
+      draft: { ...vo, id: '', name: `${label} 副本` },
+      inheritFrom: vo.id
     })
   }, [])
 
@@ -488,7 +613,7 @@ function App(): React.JSX.Element {
   )
 
   return (
-    <div className="app">
+    <div className="app" style={{ '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties}>
       <ConnectionList
         connections={connections}
         secureAvailable={secureAvailable}
@@ -500,6 +625,24 @@ function App(): React.JSX.Element {
         onEdit={(vo) => setEditor({ mode: 'edit', vo })}
         onRemove={removeConnection}
         onNotify={showToast}
+      />
+
+      {/* 侧栏与工作区之间的拖拽手柄：拖动改宽度，双击复位，方向键微调 */}
+      <div
+        className={resizing ? 'splitter dragging' : 'splitter'}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整侧栏宽度"
+        aria-valuenow={Math.round(sidebarWidth)}
+        aria-valuemin={SIDEBAR_MIN_WIDTH}
+        aria-valuemax={sidebarMaxWidth()}
+        tabIndex={0}
+        onPointerDown={startResize}
+        onPointerMove={moveResize}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+        onDoubleClick={resetSidebarWidth}
+        onKeyDown={resizeByKeyboard}
       />
 
       <main className="workspace">
@@ -535,6 +678,12 @@ function App(): React.JSX.Element {
         <ConnectionForm
           initial={editor.mode === 'edit' ? editor.vo : editor.draft}
           isNew={editor.mode !== 'edit'}
+          inheritedCredentialFrom={editor.mode === 'new' ? editor.inheritFrom : undefined}
+          inheritedCredentialName={
+            editor.mode === 'new' && editor.draft
+              ? editor.draft.name.replace(/ 副本$/, '')
+              : undefined
+          }
           onSubmit={saveConnection}
           onCancel={() => setEditor(null)}
         />
