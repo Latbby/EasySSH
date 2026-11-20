@@ -886,7 +886,8 @@ async function createConnectionViaForm(cdp, dto) {
     await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消')`)
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '关闭残留弹窗')
   }
-  await cdp.evaluate(`window.__e2eUI.click('.sidebar-head .primary-btn')`)
+  // 侧栏头部现在有两个按钮（新建分组 / 新建连接），必须按 title 精确定位
+  await cdp.evaluate(`window.__e2eUI.click('.sidebar-head .primary-btn[title="新建连接"]')`)
   await waitForCondition(
     cdp,
     `document.querySelector('.modal-title')?.textContent === '新建连接'`,
@@ -901,7 +902,11 @@ async function createConnectionViaForm(cdp, dto) {
     await cdp.evaluate(`window.__e2eUI.setField('密码', ${JSON.stringify(dto.password)})`)
   }
   await cdp.evaluate(`window.__e2eUI.click('.modal button[type="submit"]')`)
-  await waitForCondition(cdp, `!document.querySelector('.modal-title')`, `提交后弹窗关闭（${dto.name}）`)
+  await waitForCondition(
+    cdp,
+    `!document.querySelector('.modal-title')`,
+    `提交后弹窗关闭（${dto.name}）`
+  )
   await waitForCondition(
     cdp,
     `Array.from(document.querySelectorAll('.conn-name')).some((el) => el.textContent.includes(${JSON.stringify(dto.name)}))`,
@@ -961,7 +966,9 @@ async function main() {
     // 打包产物可能早于本轮源码改动，导致新用例跑在旧代码上
     const devMain = path.join(PROJECT_ROOT, 'out', 'main', 'index.js')
     if (fs.existsSync(devMain) && fs.statSync(devMain).mtimeMs > fs.statSync(packagedExe).mtimeMs) {
-      console.log('[警告] 打包产物早于 out/ 最新构建，可能掩盖本轮改动；验证新代码请先把 dist 改名后重跑')
+      console.log(
+        '[警告] 打包产物早于 out/ 最新构建，可能掩盖本轮改动；验证新代码请先把 dist 改名后重跑'
+      )
     }
   }
 
@@ -1159,7 +1166,8 @@ async function main() {
     // -----------------------------------------------------------------------
     // 8. 界面新建连接：为 SFTP 用例准备列表项，同时验证表单提交后列表自动刷新
     // -----------------------------------------------------------------------
-    await cdp.evaluate(`window.__e2eUI.click('.sidebar-head .primary-btn')`)
+    // 侧栏头部现在有两个按钮（新建分组 / 新建连接），必须按 title 精确定位
+    await cdp.evaluate(`window.__e2eUI.click('.sidebar-head .primary-btn[title="新建连接"]')`)
     await waitForCondition(
       cdp,
       `document.querySelector('.modal-title')?.textContent === '新建连接'`,
@@ -1249,7 +1257,11 @@ async function main() {
 
     // 不改密码直接保存：留空的语义必须是「保留已保存的密码」，不能变成清空
     await cdp.evaluate(`window.__e2eUI.click('.modal button[type="submit"]')`)
-    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '不改动直接保存后弹窗关闭')
+    await waitForCondition(
+      cdp,
+      `!document.querySelector('.modal-title')`,
+      '不改动直接保存后弹窗关闭'
+    )
     const credentialAfterSave = await cdp.evaluate(
       `(async () => JSON.stringify(await window.api.connections.getCredential(${JSON.stringify(saved.id)})))()`
     )
@@ -1264,11 +1276,7 @@ async function main() {
       `document.querySelector('.modal-title')?.textContent === '编辑连接'`,
       '再次打开编辑表单（验证回显未被误清）'
     )
-    await waitForCondition(
-      cdp,
-      passwordEchoed,
-      '再次打开编辑表单仍回显已保存的密码（未被误清）'
-    )
+    await waitForCondition(cdp, passwordEchoed, '再次打开编辑表单仍回显已保存的密码（未被误清）')
 
     // -----------------------------------------------------------------------
     // 8.2 弹窗遮罩只在「按下与松开都落在遮罩本身」时才关闭
@@ -1338,7 +1346,11 @@ async function main() {
     })()`)
     await waitFor(cdp, `!document.querySelector('.toast')`, 3000)
     await cdp.evaluate(`window.__e2eUI.openConnection('E2E 未监听端口')`)
-    await waitForCondition(cdp, `!!document.querySelector('.toast')`, '连接不可用端口后出现 Toast 提示')
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.toast')`,
+      '连接不可用端口后出现 Toast 提示'
+    )
     const toastClass = await cdp.evaluate(`document.querySelector('.toast').className`)
     if (!/\berror\b/.test(toastClass)) {
       throw new Error(`Toast 未带 error 分级类名，实际 class=${toastClass}`)
@@ -1393,7 +1405,9 @@ async function main() {
       )
     }
     pass('弹窗展示的新旧指纹与两次服务端密钥的真实 SHA256 一致')
-    if (JSON.parse(fs.readFileSync(knownHostsFile, 'utf8'))[`127.0.0.1:${SSH_PORT}`] !== fingerprintA) {
+    if (
+      JSON.parse(fs.readFileSync(knownHostsFile, 'utf8'))[`127.0.0.1:${SSH_PORT}`] !== fingerprintA
+    ) {
       throw new Error('未确认前 known_hosts.json 已被改写，存在静默信任新密钥的问题')
     }
     pass('未确认前 known_hosts.json 仍保存旧指纹，没有静默信任')
@@ -1412,7 +1426,9 @@ async function main() {
     // 11.x 用户先取消弹窗：待确认记录仍然存在，随后用于验证「服务端下线不得误报密钥变更」
     await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消连接')`)
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '取消连接后弹窗关闭')
-    if (JSON.parse(fs.readFileSync(knownHostsFile, 'utf8'))[`127.0.0.1:${SSH_PORT}`] !== fingerprintA) {
+    if (
+      JSON.parse(fs.readFileSync(knownHostsFile, 'utf8'))[`127.0.0.1:${SSH_PORT}`] !== fingerprintA
+    ) {
       throw new Error('取消连接后 known_hosts.json 被改写，取消不应产生任何持久化副作用')
     }
     pass('取消连接后 known_hosts.json 仍保存旧指纹')
@@ -1691,7 +1707,10 @@ async function main() {
       await cdp.evaluate(`window.__e2eUI.click('.theme-toggle')`)
     }
     const themeDark = JSON.parse(await cdp.evaluate(themeProbe))
-    assert(themeDark.mode === 'dark', `主题已固定为显式深色，供重启持久化用例使用（mode=${themeDark.mode}）`)
+    assert(
+      themeDark.mode === 'dark',
+      `主题已固定为显式深色，供重启持久化用例使用（mode=${themeDark.mode}）`
+    )
 
     // -----------------------------------------------------------------------
     // 12.7 连接分组：移动到分组、分组标题出现、折叠与展开、IPC 回读
@@ -1765,7 +1784,9 @@ async function main() {
     )
 
     // 12.7b 新建空分组：侧栏按钮 → 命名弹窗 → 空分组以计数 0 立即出现
-    await cdp.evaluate(`window.__e2eUI.click('.sidebar-head-actions .icon-btn[title="新建分组"]')`)
+    await cdp.evaluate(
+      `window.__e2eUI.click('.sidebar-head-actions .primary-btn[title="新建分组"]')`
+    )
     await waitForCondition(
       cdp,
       `document.querySelector('.modal-title')?.textContent === '新建分组'`,
@@ -1901,7 +1922,10 @@ async function main() {
       )
     )
     assert(resizerShape.resizers === 3, `表头有 3 个列宽拖拽手柄（实际 ${resizerShape.resizers}）`)
-    assert(resizerShape.sizeWidth === '96px', `size 列初始宽度为 96px（实际 ${resizerShape.sizeWidth}）`)
+    assert(
+      resizerShape.sizeWidth === '96px',
+      `size 列初始宽度为 96px（实际 ${resizerShape.sizeWidth}）`
+    )
 
     /**
      * 在可见 SFTP 表头上拖动第 index 个列宽手柄。
@@ -2371,7 +2395,10 @@ async function main() {
         3000
       )
       if (options.expectDragClass) {
-        assert(dragStarted === true, '按住分隔条后进入拖动态（.splitter.dragging 与 body.resizing 同步）')
+        assert(
+          dragStarted === true,
+          '按住分隔条后进入拖动态（.splitter.dragging 与 body.resizing 同步）'
+        )
       }
       // 分两次移动，避免一次瞬移掩盖 pointermove 的连续性
       await cdp.dispatchMouse('mouseMoved', {
@@ -2397,7 +2424,11 @@ async function main() {
         buttons: 0,
         clickCount: 1
       })
-      await waitFor(cdp, `!document.querySelector('.splitter').classList.contains('dragging')`, 3000)
+      await waitFor(
+        cdp,
+        `!document.querySelector('.splitter').classList.contains('dragging')`,
+        3000
+      )
       return { during, expectedDuring }
     }
 
@@ -2496,7 +2527,9 @@ async function main() {
     await clickPair(2)
     let doubleClickReset = await waitFor(cdp, `${sidebarCssWidth} === '300px'`, 2500)
     if (!doubleClickReset) {
-      console.log('[信息] CDP 双击序列未触发 dblclick，退回页面内合成 dblclick 复核（断言的行为不变）')
+      console.log(
+        '[信息] CDP 双击序列未触发 dblclick，退回页面内合成 dblclick 复核（断言的行为不变）'
+      )
       await cdp.evaluate(`(() => {
         document.querySelector('.splitter').dispatchEvent(
           new MouseEvent('dblclick', { bubbles: true, cancelable: true })
@@ -2521,11 +2554,19 @@ async function main() {
     })()`)
     if (!splitterFocused) throw new Error('分隔条无法获得焦点，无法验证键盘微调')
     await cdp.dispatchKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 })
-    await waitForCondition(cdp, `${sidebarCssWidth} === '316px'`, 'ArrowRight 把侧栏加宽 16px 到 316px')
+    await waitForCondition(
+      cdp,
+      `${sidebarCssWidth} === '316px'`,
+      'ArrowRight 把侧栏加宽 16px 到 316px'
+    )
     await cdp.dispatchKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 })
     await waitForCondition(cdp, `${sidebarCssWidth} === '332px'`, '再按 ArrowRight 到 332px')
     await cdp.dispatchKey({ key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 })
-    await waitForCondition(cdp, `${sidebarCssWidth} === '316px'`, 'ArrowLeft 把侧栏收窄 16px 回到 316px')
+    await waitForCondition(
+      cdp,
+      `${sidebarCssWidth} === '316px'`,
+      'ArrowLeft 把侧栏收窄 16px 回到 316px'
+    )
     await cdp.dispatchKey({ key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 })
     await waitForCondition(cdp, `${sidebarCssWidth} === '300px'`, 'Home 键复位到默认宽度 300px')
 
@@ -2533,7 +2574,11 @@ async function main() {
     await cdp.dispatchKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 })
     await waitForCondition(cdp, `${sidebarCssWidth} === '316px'`, '键盘微调后停在 316px')
     await cdp.dispatchKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 })
-    await waitForCondition(cdp, `${sidebarCssWidth} === '332px'`, '键盘微调后停在 332px（供重新加载持久化断言）')
+    await waitForCondition(
+      cdp,
+      `${sidebarCssWidth} === '332px'`,
+      '键盘微调后停在 332px（供重新加载持久化断言）'
+    )
     const finalSidebar = await readSidebarState()
     assert(
       finalSidebar.stored === '332' && finalSidebar.sidebarWidth === 332,
@@ -2636,7 +2681,9 @@ async function main() {
     const copyRow = rawConnections.find((row) => row.id === copyVo.id)
     if (!copyRow) throw new Error('落盘文件里找不到副本记录')
     assert(
-      typeof copyRow.secret === 'string' && copyRow.secret.length > 0 && copyRow.secret !== 's3cret-pw',
+      typeof copyRow.secret === 'string' &&
+        copyRow.secret.length > 0 &&
+        copyRow.secret !== 's3cret-pw',
       `副本在落盘文件里带密文字段（secret 长度 ${copyRow.secret ? copyRow.secret.length : 0}，明文未落盘）`
     )
     await cdp.evaluate(`window.__e2eUI.clickConnectionAction('E2E 测试机 副本', '编辑')`)
@@ -2879,7 +2926,8 @@ async function main() {
       if (textarea) textarea.focus()
       return !!textarea
     })()`
-    if (!(await cdp.evaluate(focusTerminal))) throw new Error('找不到激活终端的输入区，无法测试搜索')
+    if (!(await cdp.evaluate(focusTerminal)))
+      throw new Error('找不到激活终端的输入区，无法测试搜索')
     // 优先用 CDP 注入真实按键（走浏览器输入管线，等价用户按 Ctrl+F）
     await cdp.dispatchKey({ key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70, modifiers: 2 })
     let searchOpened = await waitFor(cdp, `!!document.querySelector('.term-search')`, 4000)
@@ -3031,10 +3079,7 @@ async function main() {
     const restoreSources = await cdp.evaluate(
       `document.querySelectorAll('.status-bar .status-text')[1].textContent`
     )
-    assert(
-      restoreSources.includes('E2E 测试机'),
-      `提示条列出会话来源连接名（${restoreSources}）`
-    )
+    assert(restoreSources.includes('E2E 测试机'), `提示条列出会话来源连接名（${restoreSources}）`)
 
     await cdp.evaluate(`window.__e2eUI.clickByText('.status-actions button', '恢复')`)
     await waitForCondition(
@@ -3077,10 +3122,7 @@ async function main() {
       '第二次启动同样出现会话恢复提示条'
     )
     const sftpSummary = await cdp.evaluate(`document.querySelector('.status-text').textContent`)
-    assert(
-      sftpSummary.includes('终端 0 / 文件 1'),
-      `提示条按类型统计 SFTP 标签（${sftpSummary}）`
-    )
+    assert(sftpSummary.includes('终端 0 / 文件 1'), `提示条按类型统计 SFTP 标签（${sftpSummary}）`)
     await cdp.evaluate(`window.__e2eUI.clickByText('.status-actions button', '忽略')`)
     await waitForCondition(
       cdp,

@@ -361,6 +361,9 @@ body.resizing {
   height: 28px;
   padding: 0 10px;
   font-size: 12.5px;
+  /* 侧栏窄时两个按钮不换行、不压缩，标题让位 */
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .sidebar-foot {

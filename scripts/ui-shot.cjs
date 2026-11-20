@@ -2872,7 +2872,7 @@ async function checkContrast(ctx, outDir) {
   fs.rmSync(localPath, { force: true })
 
   // ---- 第五段：连接表单弹窗 ----
-  await ctx.cdp.evaluate(`window.__uiShot.click('.sidebar-head .primary-btn')`)
+  await ctx.cdp.evaluate(`window.__uiShot.click('.sidebar-head .primary-btn[title="新建连接"]')`)
   await waitFor(ctx.cdp, `window.__uiShot.text('.modal-title') === '新建连接'`, '打开新建连接表单')
   // .modal 有 140ms 的入场动画（opacity 0→1），必须等动画结束再采样，否则量到的是半透明中间帧
   await sleep(400)
@@ -3396,7 +3396,7 @@ const CHECKS = [
      */
     async prepare(ctx) {
       await ctx.cdp.evaluate('window.__uiShot.closeOverlays()')
-      await ctx.cdp.evaluate(`window.__uiShot.click('.sidebar-head .primary-btn')`)
+      await ctx.cdp.evaluate(`window.__uiShot.click('.sidebar-head .primary-btn[title="新建连接"]')`)
       await waitFor(
         ctx.cdp,
         `window.__uiShot.text('.modal-title') === '新建连接'`,
@@ -4127,7 +4127,7 @@ const CHECKS = [
         await ctx.cdp.evaluate(`window.__uiShot.clickTab('测试环境', 'terminal')`)
         await sleep(200)
       }
-      await ctx.cdp.evaluate(`window.__uiShot.click('.sidebar-head .primary-btn')`)
+      await ctx.cdp.evaluate(`window.__uiShot.click('.sidebar-head .primary-btn[title="新建连接"]')`)
       await waitFor(ctx.cdp, `window.__uiShot.text('.modal-title') === '新建连接'`, '打开新建连接表单')
       await ctx.cdp.evaluate(`window.__uiShot.setField('名称', '预发布环境')`)
       await ctx.cdp.evaluate(`window.__uiShot.setField('主机', 'staging-01.internal')`)

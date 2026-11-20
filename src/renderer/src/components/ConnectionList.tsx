@@ -313,15 +313,12 @@ function ConnectionList({
       <header className="sidebar-head">
         <span className="sidebar-title">连接</span>
         <div className="sidebar-head-actions">
-          <button
-            className="icon-btn"
-            title="新建分组"
-            aria-label="新建分组"
-            onClick={openCreateGroup}
-          >
+          {/* 与「新建」同样的按钮样式，避免图标按钮太小不显眼 */}
+          <button className="primary-btn" title="新建分组" onClick={openCreateGroup}>
             <Icon name="folder-plus" size={14} />
+            新建分组
           </button>
-          <button className="primary-btn" onClick={onCreate}>
+          <button className="primary-btn" title="新建连接" onClick={onCreate}>
             <Icon name="plus" size={14} />
             新建
           </button>
