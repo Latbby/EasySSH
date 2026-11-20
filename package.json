@@ -23,12 +23,9 @@
     "verify:sftp": "node scripts/verify-sftp.cjs",
     "verify:store": "node scripts/verify-store.cjs",
     "verify:hostkey": "node scripts/verify-hostkey.cjs",
-    "verify:quickconnect": "node scripts/verify-quickconnect.cjs",
-    "verify:forward": "node scripts/verify-forward.cjs",
-    "verify:config-io": "node scripts/verify-config-io.cjs",
     "verify:resume": "node scripts/verify-resume.cjs",
     "verify:perf": "node scripts/verify-perf.cjs",
-    "verify": "npm run verify:ssh && npm run verify:store && npm run verify:sftp && npm run verify:hostkey && npm run verify:quickconnect && npm run verify:forward && npm run verify:config-io && npm run verify:resume && npm run verify:perf",
+    "verify": "npm run verify:ssh && npm run verify:store && npm run verify:sftp && npm run verify:hostkey && npm run verify:resume && npm run verify:perf",
     "verify:e2e": "npm run build && node scripts/e2e-smoke.cjs",
     "ui:shot": "node scripts/ui-shot.cjs"
   },

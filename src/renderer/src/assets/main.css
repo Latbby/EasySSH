@@ -350,43 +350,11 @@ input[type='checkbox'] {
   border-color: transparent;
 }
 
-/* ===== 侧边栏：快速连接与搜索 ===== */
-
-.quick-connect {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  flex: 0 0 auto;
-  margin: 12px 12px 10px;
-  padding: 10px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-}
-
-.quick-connect input {
-  height: 30px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.quick-connect-hint {
-  color: var(--text-faint);
-  font-size: 11px;
-  line-height: 1.5;
-  /* 允许折行：侧栏只有 272px，单行省略会让提示读不全 */
-  overflow-wrap: anywhere;
-}
-
-.quick-connect-error {
-  color: var(--danger);
-  font-size: 11px;
-  line-height: 1.45;
-}
+/* ===== 侧边栏：搜索与连接列表 ===== */
 
 .conn-search {
   flex: 0 0 auto;
-  padding: 0 12px 10px;
+  padding: 12px 12px 10px;
 }
 
 .conn-search input {
@@ -1249,14 +1217,6 @@ input[type='checkbox'] {
   border-top: 1px solid var(--border-subtle);
 }
 
-/* 兼容未分栏的旧结构 */
-.modal-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .modal-note {
   margin: 0;
   font-size: 12.5px;
@@ -1524,28 +1484,6 @@ input[type='checkbox'] {
   padding: 0;
 }
 
-/* ===== 侧栏操作行（导入 / 导出） ===== */
-
-.sidebar-actions {
-  display: flex;
-  gap: 6px;
-  flex: 0 0 auto;
-  padding: 0 12px 10px;
-}
-
-.sidebar-actions button {
-  flex: 1;
-  height: 28px;
-  padding: 0 8px;
-  font-size: 12px;
-  color: var(--text-muted);
-  background: var(--bg-surface);
-}
-
-.sidebar-actions button:hover:not(:disabled) {
-  color: var(--text);
-}
-
 /* ===== 状态条上的操作按钮（会话恢复提示） ===== */
 
 .status-actions {
@@ -1604,110 +1542,4 @@ input[type='checkbox'] {
 .sftp-head .col-size,
 .sftp-head .col-time {
   position: relative;
-}
-
-/* ===== 端口转发面板 ===== */
-
-.fwd-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 260px;
-  overflow-y: auto;
-}
-
-.fwd-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius);
-}
-
-.fwd-main {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  flex: 1;
-  min-width: 0;
-}
-
-.fwd-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fwd-desc {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fwd-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-  height: 20px;
-  padding: 0 8px;
-  font-size: 11px;
-  border-radius: 999px;
-  background: var(--bg-hover);
-  color: var(--text-muted);
-}
-
-.fwd-status.running {
-  color: var(--success);
-  background: var(--success-soft);
-}
-
-.fwd-status.error {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
-.fwd-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-}
-
-.fwd-empty {
-  padding: 18px 12px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-faint);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius);
-}
-
-.fwd-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding-top: 4px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.fwd-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-.fwd-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-muted);
 }

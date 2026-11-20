@@ -1,6 +1,5 @@
-import { useState } from 'react'
-import type { ConnectionVO, SaveConnectionDTO } from '@shared/types'
-import { parseQuickConnect } from '../quickConnect'
+import { useRef, useState } from 'react'
+import type { ConnectionVO } from '@shared/types'
 import { toMessage } from '../utils'
 import type { ToastKind } from '../types'
 import Icon from './Icon'
@@ -12,15 +11,10 @@ const UNGROUPED_LABEL = '未分组'
 /** 未分组在列表里的键，分组名为空串时用它占位 */
 const UNGROUPED_KEY = '__ungrouped__'
 
-/** 侧栏收起的操作结果提示文案里最多带上的逐条原因条数 */
-const MAX_NOTIFY_REASONS = 2
-
 interface Props {
   connections: ConnectionVO[]
   /** 当前系统是否可安全存储凭据，不可用时提示用户改用私钥 */
   secureAvailable: boolean
-  /** 快速连接未写用户名时使用的默认用户名 */
-  defaultUsername: string
   /** 已有打开会话的连接 id，用于在列表里标出"已连接" */
   activeIds: string[]
   /** 点击连接项，打开终端 */
@@ -33,14 +27,10 @@ interface Props {
   onEdit(vo: ConnectionVO): void
   /** 删除连接，调用方负责二次确认 */
   onRemove(vo: ConnectionVO): void
-  /** 快速连接：把临时连接交给调用方直接打开，不落盘 */
-  onQuickConnect(dto: SaveConnectionDTO): void
   /** 复制连接：调用方以原配置生成草稿并打开新建表单 */
   onDuplicate(vo: ConnectionVO): void
-  /** 导入、导出、移动分组的结果提示，由调用方显示提示条；未传时静默处理 */
+  /** 移动分组的结果提示，由调用方显示提示条；未传时静默处理 */
   onNotify?(kind: ToastKind, text: string): void
-  /** 打开端口转发面板；未传时不显示入口 */
-  onOpenForward?(): void
 }
 
 /** 一个分组及其连接 */
@@ -76,27 +66,22 @@ function groupConnections(list: ConnectionVO[]): ConnectionGroup[] {
 }
 
 /**
- * 左侧连接列表，含快速连接、搜索过滤、分组展示与连接操作。
+ * 左侧连接列表，含搜索过滤、分组展示与连接操作。
  * @param props 见 Props
  * @returns 侧边栏元素
  */
 function ConnectionList({
   connections,
   secureAvailable,
-  defaultUsername,
   activeIds,
   onConnect,
   onOpenSftp,
   onCreate,
   onEdit,
   onRemove,
-  onQuickConnect,
   onDuplicate,
-  onNotify,
-  onOpenForward
+  onNotify
 }: Props): React.JSX.Element {
-  const [quickInput, setQuickInput] = useState('')
-  const [quickError, setQuickError] = useState<string | null>(null)
   const [keyword, setKeyword] = useState('')
   /** 已折叠的分组名，搜索时统一忽略折叠状态 */
   const [collapsedGroups, setCollapsedGroups] = useState<string[]>([])
@@ -106,33 +91,24 @@ function ConnectionList({
    */
   const [groupPrompt, setGroupPrompt] = useState<{ vo: ConnectionVO; value: string } | null>(null)
   /**
-   * 导入、移动分组后主进程返回的最新列表。
+   * 移动分组后主进程返回的最新列表。
    * 记录它对应的父组件列表引用：父组件一旦刷新出新的数组，这份副本就自动失效，避免两份状态长期打架。
    */
   const [override, setOverride] = useState<{ from: ConnectionVO[]; list: ConnectionVO[] } | null>(
     null
   )
+  /** 弹窗遮罩的按下、松开标记：只有两者都落在遮罩上才关闭，避免在输入框里拖选文字时误关弹窗 */
+  const pressOnMaskRef = useRef(false)
+  const releaseOnMaskRef = useRef(false)
 
   const list = override && override.from === connections ? override.list : connections
 
   /**
-   * 记录一次操作后的最新列表，让侧栏立刻反映导入与分组改动。
+   * 记录一次操作后的最新列表，让侧栏立刻反映分组改动。
    * @param fresh 主进程返回的最新连接列表
    */
   const applyFreshList = (fresh: ConnectionVO[]): void => {
     setOverride({ from: connections, list: fresh })
-  }
-
-  /** 回车提交快速连接：解析通过后清空输入并交给调用方打开临时会话 */
-  const submitQuickConnect = (): void => {
-    const parsed = parseQuickConnect(quickInput, defaultUsername)
-    if (!parsed.ok) {
-      setQuickError(parsed.error)
-      return
-    }
-    setQuickError(null)
-    setQuickInput('')
-    onQuickConnect(parsed.dto)
   }
 
   /** 展开或折叠一个分组 */
@@ -140,47 +116,6 @@ function ConnectionList({
     setCollapsedGroups((prev) =>
       prev.includes(name) ? prev.filter((item) => item !== name) : [...prev, name]
     )
-  }
-
-  /** 用主进程返回的最新列表刷新侧栏，保证导入与分组改动立刻可见 */
-  const reloadList = async (): Promise<void> => {
-    applyFreshList(await window.api.connections.list())
-  }
-
-  /** 从 OpenSSH 配置或本应用导出的 JSON 导入连接 */
-  const importConnections = async (): Promise<void> => {
-    try {
-      const result = await window.api.connections.importFromFile()
-      // null 表示用户在文件选择框里取消了，不需要任何提示
-      if (!result) return
-      await reloadList()
-      const summary = `导入完成：新增 ${result.imported} 个，跳过 ${result.skipped} 个`
-      if (result.errors.length === 0) {
-        onNotify?.('success', summary)
-        return
-      }
-      // 逐条原因可能很长，提示条只带前几条，完整清单留在控制台便于排查
-      console.warn('导入连接时部分记录未导入：', result.errors)
-      const reasons = result.errors.slice(0, MAX_NOTIFY_REASONS).join('；')
-      const more = result.errors.length > MAX_NOTIFY_REASONS ? ' 等' : ''
-      onNotify?.(result.imported > 0 ? 'info' : 'error', `${summary}（${reasons}${more}）`)
-    } catch (err) {
-      onNotify?.('error', toMessage(err))
-    }
-  }
-
-  /** 把全部连接导出为 JSON 或 OpenSSH 配置，导出内容不含任何凭据 */
-  const exportConnections = async (): Promise<void> => {
-    try {
-      const result = await window.api.connections.exportToFile()
-      if (!result) return
-      const formatName = result.format === 'json' ? 'JSON' : 'OpenSSH 配置'
-      // 路径可能很长，提示条里只说文件名，完整路径用户可以在保存框里看到
-      const fileName = result.path.split(/[\\/]/).pop() ?? result.path
-      onNotify?.('success', `已导出 ${result.exported} 个连接到 ${fileName}（${formatName}）`)
-    } catch (err) {
-      onNotify?.('error', toMessage(err))
-    }
   }
 
   /** 把连接移动到用户输入的分组，留空表示移出分组 */
@@ -219,12 +154,6 @@ function ConnectionList({
     ? groupPrompt.vo.name || `${groupPrompt.vo.username}@${groupPrompt.vo.host}`
     : ''
 
-  // 默认用户名先 trim：系统取不到用户名时提示不能再说「未写用户名时用 X」，否则文案末尾悬空
-  const fallbackUser = defaultUsername.trim()
-  const quickHint = fallbackUser
-    ? `回车直接连接且不保存，未写用户名时用 ${fallbackUser}`
-    : '回车直接连接且不保存；请按 用户名@主机 填写'
-
   return (
     <aside className="sidebar">
       <header className="sidebar-head">
@@ -234,45 +163,6 @@ function ConnectionList({
           新建
         </button>
       </header>
-
-      <div className="sidebar-actions">
-        <button type="button" title="从 OpenSSH 配置或 JSON 文件导入" onClick={importConnections}>
-          <Icon name="import" size={14} />
-          导入
-        </button>
-        <button type="button" title="导出全部连接（不含任何凭据）" onClick={exportConnections}>
-          <Icon name="export" size={14} />
-          导出
-        </button>
-        {/* 端口转发面板由 App 提供，未接线时不显示入口，避免点了没反应 */}
-        {onOpenForward && (
-          <button type="button" title="端口转发" onClick={onOpenForward}>
-            <Icon name="plug" size={14} />
-            隧道
-          </button>
-        )}
-      </div>
-
-      <div className="quick-connect">
-        <input
-          value={quickInput}
-          onChange={(event) => {
-            setQuickInput(event.target.value)
-            // 输入变化即清掉上一次的解析错误，避免旧提示误导
-            if (quickError) setQuickError(null)
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              submitQuickConnect()
-            }
-          }}
-          placeholder="user@host:22"
-          aria-label="快速连接"
-        />
-        <span className="quick-connect-hint">{quickHint}</span>
-        {quickError && <span className="quick-connect-error">{quickError}</span>}
-      </div>
 
       {!secureAvailable && (
         <p className="warn-text">系统安全存储不可用，无法保存密码，请改用私钥认证</p>
@@ -288,11 +178,7 @@ function ConnectionList({
       </div>
 
       {/* 空态提示紧跟在搜索框下方：列表区域会被 flex 撑开，放在列表之后会被推到侧栏底部 */}
-      {list.length === 0 && !key && (
-        <p className="hint-text">
-          还没有连接，点「新建」添加一个，或在上面输入 user@host:22 直接连接
-        </p>
-      )}
+      {list.length === 0 && !key && <p className="hint-text">还没有连接，点「新建」添加一个</p>}
       {key !== '' && visible.length === 0 && <p className="hint-text">没有匹配的连接</p>}
 
       <ul className="conn-list">
@@ -398,7 +284,24 @@ function ConnectionList({
       </footer>
 
       {groupPrompt && (
-        <div className="modal-mask" onClick={() => setGroupPrompt(null)}>
+        <div
+          className="modal-mask"
+          onMouseDown={(event) => {
+            // 只记「落点是否就是遮罩本身」，弹窗内部的按下不算
+            pressOnMaskRef.current = event.target === event.currentTarget
+          }}
+          onMouseUp={(event) => {
+            releaseOnMaskRef.current = event.target === event.currentTarget
+          }}
+          onClick={(event) => {
+            // click 的目标是按下点与松开点的最近公共祖先，在输入框里拖选文字松手落到遮罩上时
+            // 也会命中这里，所以必须按下与松开都在遮罩上才关闭
+            const onMask = pressOnMaskRef.current && releaseOnMaskRef.current
+            pressOnMaskRef.current = false
+            releaseOnMaskRef.current = false
+            if (onMask && event.target === event.currentTarget) setGroupPrompt(null)
+          }}
+        >
           <form
             className="modal"
             role="dialog"

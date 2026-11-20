@@ -9,10 +9,10 @@
  *      （与 e2e-smoke.cjs 的 9333、另一名验证者的 2222/9333 全部错开）
  *   3. 用 CDP 固定视口（默认 1360x860，--dpr 可放大像素密度，支持 1 / 1.25 / 1.5 / 2 等小数），
  *      通过 DOM 事件、CDP 输入注入与 window.api 驱动界面
- *   4. 依次截 19 张固定命名的 PNG，任一状态驱动失败都会打印原因并以非零码退出
+ *   4. 依次截 18 张固定命名的 PNG，任一状态驱动失败都会打印原因并以非零码退出
  *
  * 用法：
- *   node scripts/ui-shot.cjs                              # 全部 19 张，输出到 scripts/ui-shots/after
+ *   node scripts/ui-shot.cjs                              # 全部 18 张，输出到 scripts/ui-shots/after
  *   node scripts/ui-shot.cjs --out=scripts/ui-shots/before # 指定输出目录（清单里会打印实际目录）
  *   node scripts/ui-shot.cjs --only=03,05,07              # 只截指定编号（前置状态会自动准备）
  *   node scripts/ui-shot.cjs --only=03 --dpr=2            # 2 倍像素密度（1360x860 -> 2720x1720）
@@ -43,11 +43,13 @@
  *   12-light.png         浅色主题（走 .theme-toggle 真实切换路径）下的终端 + 侧栏
  *   13-light-sftp.png    浅色主题下的 SFTP 面板
  *   14-groups.png        侧栏分组：未分组 + 4 个分组，其中「生产环境」折叠
- *   15-forward.png       端口转发面板：1 条运行中 + 1 条已停止的规则
  *   16-restore.png       会话恢复提示条（预置 session 快照后重载页面触发）
  *   17-hidpi.png         --dpr=2 的终端态（含 1px 描边与文字清晰度断言）
  *   18-bigdir.png        2000 行目录：虚拟滚动、表头固定、行高一致、滚动可定位
  *   19-light-dialog.png  浅色主题下的新建连接表单
+ *
+ * 注：原 15-forward（端口转发面板）已随用户要求移除该功能而删除；编号不复用，
+ *     16~19 保持原编号，便于与历史截图和 scripts/ui-review.md、verify-report.md 对照。
  *
  * 检查产物（--checks=...）：
  *   dpr/03-terminal-dpr{1,1.25,1.5,2}.png + report-dpr.json    高 DPI 对照
@@ -89,6 +91,11 @@ const BIG_DIR = `${FAKE_HOME}/bigdir`
 const BIG_DIR_ENTRIES = 2000
 /** 高 DPI 对照检查使用的像素密度序列 */
 const DPR_SWEEP = [1, 1.25, 1.5, 2]
+/**
+ * 09-toast 借用的演示连接：快速连接移除后，错误提示只能靠「点一条连不通的已保存连接」触发，
+ * 这里把这条内网机器临时改到未监听端口，截图后由该步的 verify 改回原配置。
+ */
+const TOAST_DEMO_CONNECTION = '备份节点'
 
 /** 临时 userData 目录，在 main 里创建、收尾时删除，避免污染真实用户配置 */
 let USER_DATA_DIR = null
@@ -1006,7 +1013,8 @@ const PAGE_HELPERS = `
       (el) => (el.textContent || '').includes('取消')
     );
     if (cancel) cancel.click();
-    // 端口转发面板的关闭按钮文案是「关闭」，单独兜一次，否则它会一直盖在工作区上
+    // 兜底：当前弹窗底部的关闭按钮都是「取消」，这里再兜一次文案为「关闭」的按钮，
+    // 防止将来新增的弹窗只提供「关闭」时一直盖在工作区上
     const closeFoot = Array.from(document.querySelectorAll('.modal-foot button')).find(
       (el) => (el.textContent || '').includes('关闭')
     );
@@ -1070,27 +1078,6 @@ const PAGE_HELPERS = `
     head.click();
     return true;
   };
-  // ---- 端口转发面板 ----
-  shot.openForward = () => {
-    const button = Array.from(document.querySelectorAll('.sidebar-actions button')).find(
-      (el) => (el.getAttribute('title') || '') === '端口转发'
-    );
-    if (!button) throw new Error('侧栏操作行里没有「端口转发」按钮');
-    button.click();
-    return true;
-  };
-  shot.fwdRows = () => Array.from(document.querySelectorAll('.modal .fwd-row')).map((el) => ({
-    title: shot.normalize((el.querySelector('.fwd-title') || {}).textContent || '').trim(),
-    desc: shot.normalize((el.querySelector('.fwd-desc') || {}).textContent || '').trim(),
-    status: (function () {
-      const badge = el.querySelector('.fwd-status');
-      return badge ? shot.normalize(badge.textContent).trim() : '';
-    })(),
-    statusClass: (function () {
-      const badge = el.querySelector('.fwd-status');
-      return badge ? badge.className.replace('fwd-status', '').trim() : '';
-    })()
-  }));
   // ---- 会话恢复提示条 ----
   shot.restoreBar = () => {
     const bar = document.querySelector('.workspace .status-bar');
@@ -1789,8 +1776,6 @@ async function auditLightTokens(ctx) {
     ['空状态说明', '--text-muted', '--bg-surface'],
     ['空状态图标/提示', '--text-faint', '--bg-surface'],
     ['快捷键提示 .kbd', '--text-muted', '--bg-raised'],
-    ['快速连接提示文案', '--text-faint', '--bg-sidebar'],
-    ['快速连接解析错误', '--danger', '--bg-sidebar'],
     ['终端搜索栏文字', '--text', '--bg-raised'],
     ['终端搜索栏计数', '--text-muted', '--bg-raised'],
     ['Toast 正文', '--text', '--bg-raised'],
@@ -1977,6 +1962,21 @@ async function openSftpByName(ctx, name) {
     `document.querySelectorAll('.tab').length > ${before}`,
     `打开「${name}」的 SFTP 标签`,
     25000
+  )
+}
+
+/**
+ * 打开某条连接的编辑表单（点侧栏连接项上的「编辑」按钮，走真实 UI 路径）。
+ * @param {object} ctx 截图上下文
+ * @param {string} name 连接名称
+ * @returns {Promise<void>}
+ */
+async function openEditForm(ctx, name) {
+  await ctx.cdp.evaluate(`window.__uiShot.clickConnAction(${JSON.stringify(name)}, '编辑')`)
+  await waitFor(
+    ctx.cdp,
+    `window.__uiShot.text('.modal-title') === '编辑连接'`,
+    `打开「${name}」的编辑表单`
   )
 }
 
@@ -2884,55 +2884,7 @@ async function checkContrast(ctx, outDir) {
   await ctx.cdp.evaluate('window.__uiShot.closeOverlays()')
   await tryWait(ctx.cdp, `!window.__uiShot.has('.modal-title')`, 4000)
 
-  // ---- 第六段：端口转发面板（空态 + 一条运行中规则）----
-  await ctx.cdp.evaluate(
-    `(async () => { for (const rule of await window.api.forward.list()) await window.api.forward.remove(rule.id); return true })()`
-  )
-  await ctx.cdp.evaluate('window.__uiShot.openForward()')
-  await waitFor(ctx.cdp, `window.__uiShot.text('.modal-title') === '端口转发'`, '打开端口转发面板')
-  await sleep(400)
-  await collect('转发面板-空态文案', '.fwd-empty', 'text', 'text-faint on 弹窗底色，阈值 4.5:1', 'forwardEmpty')
-  await collect('转发面板-字段标签', '.fwd-field span', 'text', 'text-muted，阈值 4.5:1', 'forwardEmpty')
-  await shotTo('forwardEmpty', 'contrast-forward-empty.png')
-  await ctx.cdp.evaluate(`(async () => {
-    const list = await window.api.connections.list();
-    const target = list.find((item) => item.name === '测试环境');
-    await window.api.forward.start({
-      connectionId: target.id,
-      type: 'local',
-      localHost: '127.0.0.1',
-      localPort: 18090,
-      remoteHost: '127.0.0.1',
-      remotePort: 80
-    });
-    return true;
-  })()`)
-  await waitFor(ctx.cdp, `window.__uiShot.count('.modal .fwd-row') >= 1`, '转发面板出现规则行', 15000)
-  await sleep(300)
-  await collect('转发面板-规则标题', '.fwd-row .fwd-title', 'text', '阈值 4.5:1', 'forward')
-  await collect('转发面板-规则描述', '.fwd-row .fwd-desc', 'text', '11px text-muted，阈值 4.5:1', 'forward')
-  await collect('转发面板-运行中徽标', '.fwd-status.running', 'text', 'success on success-soft，阈值 4.5:1', 'forward')
-  await shotTo('forward', 'contrast-forward.png')
-  // 再停一条规则，量"已停止"徽标（text-muted on bg-hover）
-  await ctx.cdp.evaluate(`(async () => {
-    const list = await window.api.forward.list();
-    if (list[0]) await window.api.forward.stop(list[0].id);
-    return true;
-  })()`)
-  await waitFor(
-    ctx.cdp,
-    `window.__uiShot.has('.modal .fwd-row .fwd-status.stopped')`,
-    '出现已停止徽标',
-    15000
-  )
-  await sleep(250)
-  await collect('转发面板-已停止徽标', '.fwd-status.stopped', 'text', 'text-muted on bg-hover，阈值 4.5:1', 'forwardStopped')
-  await shotTo('forwardStopped', 'contrast-forward-stopped.png')
-  await ctx.cdp.evaluate('window.__uiShot.closeOverlays()')
-  await tryWait(ctx.cdp, `!window.__uiShot.has('.modal-title')`, 4000)
-  await ctx.cdp.evaluate(
-    `(async () => { for (const rule of await window.api.forward.list()) await window.api.forward.remove(rule.id); return true })()`
-  )
+  // 原第六段（端口转发面板空态 / 运行中 / 已停止徽标）已随该功能移除而删除
 
   // ---- 第七段：会话恢复提示条（预置快照后重载触发）----
   await ctx.cdp.evaluate(`(async () => {
@@ -3472,7 +3424,7 @@ const CHECKS = [
   {
     id: '09',
     file: '09-toast.png',
-    state: `连接 127.0.0.1:${DEAD_PORT}（未监听）后的错误提示条`,
+    state: `把演示连接「${TOAST_DEMO_CONNECTION}」临时指向 127.0.0.1:${DEAD_PORT}（未监听）后点击连接的错误提示条`,
     viewport: 'default',
     requires: ['08'],
     /**
@@ -3489,15 +3441,45 @@ const CHECKS = [
       if (await isPortOpen(DEAD_PORT)) {
         throw new Error(`127.0.0.1:${DEAD_PORT} 已被监听，无法用它触发连接失败提示`)
       }
-      await ctx.cdp.evaluate(
-        `window.__uiShot.setValue('.quick-connect input', ${JSON.stringify(`127.0.0.1:${DEAD_PORT}`)})`
+      // 快速连接已按用户要求移除：改用与用户一致的 UI 路径——编辑一条演示连接指向未监听端口，
+      // 再点侧栏里的它开终端。截图后由 verify 把配置改回内网地址，避免污染后续状态
+      await openEditForm(ctx, TOAST_DEMO_CONNECTION)
+      await ctx.cdp.evaluate(`window.__uiShot.setField('主机', '127.0.0.1')`)
+      await ctx.cdp.evaluate(`window.__uiShot.setField('端口', '${DEAD_PORT}')`)
+      await ctx.cdp.evaluate(`window.__uiShot.click('.modal button[type="submit"]')`)
+      await waitFor(ctx.cdp, `!window.__uiShot.has('.modal-title')`, '保存临时改动后的连接', 15000)
+      await waitFor(
+        ctx.cdp,
+        `window.__uiShot.text('.conn-list').includes('@127.0.0.1:${DEAD_PORT}')`,
+        '侧栏已显示改到未监听端口的连接'
       )
-      await ctx.cdp.evaluate(`window.__uiShot.pressEnter('.quick-connect input')`)
+      await ctx.cdp.evaluate(`window.__uiShot.clickConnection(${JSON.stringify(TOAST_DEMO_CONNECTION)})`)
       await waitFor(ctx.cdp, `window.__uiShot.has('.toast.error')`, '出现错误提示条', 25000)
       const toastText = await ctx.cdp.evaluate(`window.__uiShot.text('.toast-text')`)
       if (!toastText.trim()) throw new Error('错误提示条没有文案')
       console.log(`[信息] 09-toast 提示文案：${toastText.trim()}`)
       await sleep(250)
+    },
+    /**
+     * 截图后把演示连接改回内网地址，保证 10 步之后的画面与本步之外的状态都不被污染。
+     * @param {object} ctx 截图上下文
+     * @returns {Promise<void>}
+     */
+    async verify(ctx) {
+      const demo = SAMPLE_CONNECTIONS.find((item) => item.name === TOAST_DEMO_CONNECTION)
+      if (!demo) throw new Error(`预置连接里缺少「${TOAST_DEMO_CONNECTION}」`)
+      await ctx.cdp.evaluate('window.__uiShot.closeOverlays()')
+      await tryWait(ctx.cdp, `!window.__uiShot.has('.toast')`, 4000)
+      await openEditForm(ctx, TOAST_DEMO_CONNECTION)
+      await ctx.cdp.evaluate(`window.__uiShot.setField('主机', ${JSON.stringify(demo.host)})`)
+      await ctx.cdp.evaluate(`window.__uiShot.setField('端口', '${demo.port}')`)
+      await ctx.cdp.evaluate(`window.__uiShot.click('.modal button[type="submit"]')`)
+      await waitFor(ctx.cdp, `!window.__uiShot.has('.modal-title')`, '恢复演示连接的原配置', 15000)
+      await waitFor(
+        ctx.cdp,
+        `window.__uiShot.text('.conn-list').includes('@${demo.host}:${demo.port}')`,
+        `「${TOAST_DEMO_CONNECTION}」已恢复为 ${demo.host}:${demo.port}`
+      )
     }
   },
   {
@@ -3764,83 +3746,14 @@ const CHECKS = [
       await sleep(300)
     }
   },
-  {
-    id: '15',
-    file: '15-forward.png',
-    state: '端口转发面板：1 条运行中的 local 规则 + 1 条已停止规则，并填好新增表单',
-    viewport: 'default',
-    requires: ['14'],
-    /**
-     * @param {object} ctx 截图上下文
-     * @returns {Promise<void>}
-     */
-    async prepare(ctx) {
-      await ctx.cdp.evaluate('window.__uiShot.closeOverlays()')
-      // 规则的真实状态由主进程持有：直接调 forward.start / forward.stop，面板再按真实路径读取
-      const rules = JSON.parse(
-        await ctx.cdp.evaluate(`(async () => {
-          const list = await window.api.connections.list();
-          const target = list.find((item) => item.name === '测试环境');
-          if (!target) throw new Error('缺少「测试环境」连接');
-          for (const rule of await window.api.forward.list()) await window.api.forward.remove(rule.id);
-          const base = {
-            connectionId: target.id,
-            type: 'local',
-            localHost: '127.0.0.1',
-            remoteHost: '127.0.0.1',
-            remotePort: 80
-          };
-          const running = await window.api.forward.start({ ...base, localPort: 18080 });
-          const stopped = await window.api.forward.start({ ...base, localPort: 18081 });
-          await window.api.forward.stop(stopped.id);
-          return JSON.stringify({ running, stopped, all: await window.api.forward.list() });
-        })()`)
-      )
-      const runningOk = rules.all.some((item) => item.status === 'running')
-      const stoppedOk = rules.all.some((item) => item.status === 'stopped')
-      if (!runningOk || !stoppedOk) {
-        throw new Error(
-          `转发规则状态不符合预期（需要 1 条 running + 1 条 stopped）：${JSON.stringify(rules.all)}`
-        )
-      }
-      await ctx.cdp.evaluate('window.__uiShot.openForward()')
-      await waitFor(ctx.cdp, `window.__uiShot.text('.modal-title') === '端口转发'`, '打开端口转发面板')
-      await waitFor(
-        ctx.cdp,
-        `window.__uiShot.count('.modal .fwd-row') >= 2`,
-        '转发面板列出两条规则'
-      )
-      const rows = JSON.parse(await ctx.cdp.evaluate('JSON.stringify(window.__uiShot.fwdRows())'))
-      const runningRows = rows.filter((row) => row.status === '运行中')
-      const stoppedRows = rows.filter((row) => row.status === '已停止')
-      if (runningRows.length !== 1 || stoppedRows.length !== 1) {
-        throw new Error(`面板里的规则状态不符合预期：${JSON.stringify(rows)}`)
-      }
-      // 表单里选好连接，避免截图停留在「请选择连接」的初始态
-      const targetId = await ctx.cdp.evaluate(`(async () => {
-        const list = await window.api.connections.list();
-        const target = list.find((item) => item.name === '测试环境');
-        return target ? target.id : '';
-      })()`)
-      if (!targetId) throw new Error('转发面板表单里找不到「测试环境」连接')
-      await ctx.cdp.evaluate(`window.__uiShot.setSelect('.fwd-grid select', ${JSON.stringify(targetId)})`)
-      await waitFor(
-        ctx.cdp,
-        `document.querySelector('.fwd-grid select').value === ${JSON.stringify(targetId)}`,
-        '转发表单已选好连接'
-      )
-      console.log(
-        `[信息] 15-forward 规则：${rows.map((row) => `${row.status}｜${row.desc}`).join('；')}`
-      )
-      await sleep(300)
-    }
-  },
+  // 原 15-forward（端口转发面板：1 条运行中 + 1 条已停止规则）已随该功能移除而删除；
+  // 编号不复用，16~19 保持原编号以便与历史截图对照
   {
     id: '16',
     file: '16-restore.png',
     state: '会话恢复提示条：预置 3 个标签的快照后重载页面触发',
     viewport: 'default',
-    requires: ['15'],
+    requires: ['14'],
     /**
      * @param {object} ctx 截图上下文
      * @returns {Promise<void>}

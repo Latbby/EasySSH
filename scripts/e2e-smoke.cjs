@@ -3,18 +3,22 @@
  *
  * 与 verify-ssh.cjs 的区别：那个只验证 ssh2 的调用姿势，本脚本验证整条产品链路——
  *   1. 渲染进程能正常挂载（React 已渲染、无 CSP/JS 报错）
- *   2. connections.save 走通 IPC，落盘后密码必须是密文，列表中不得回传凭据
+ *   2. 「新建连接」表单 → connections.save 走通 IPC，落盘后密码必须是密文，列表中不得回传凭据
  *   3. terminal.open 能建立真实会话并收到远端输出（用内置 ssh2 测试服务充当目标机）
  *   4. 中文经「远端 → SSH → 主进程 → IPC → xterm」整条链路无乱码
  *   5. resize 不会抛错
- *   6. 快速连接：输入框回车能真实连上目标并出现新标签
+ *   6. 打开已保存会话：点击侧栏里的连接项能真实连上目标并出现新标签
  *   7. 终端搜索：Ctrl+F 展开搜索栏，关键词命中计数随输入变化
  *   8. SFTP 路径栏：打开面板后可编辑跳转目录
  *   9. Toast：失败操作出现带分级类名的提示，点击可关闭
  *  10. 主机密钥变更：换掉服务端密钥后弹窗展示真实新旧指纹，确认信任后重连成功
  *  11. 本轮新增功能（见文件内 12.x / 15 编号）：主题切换与终端配色跟随、连接分组折叠与移动、
- *      导入导出入口与 window.api 链路、SFTP 列宽拖拽、2000 行大目录虚拟滚动、
- *      远程编辑入口与失败提示、端口转发面板启停一条 local 规则、会话恢复提示条与恢复动作
+ *      SFTP 列宽拖拽、2000 行大目录虚拟滚动、远程编辑入口与失败提示、
+ *      会话恢复提示条与恢复动作
+ *  12. 用户要求移除快速连接 / 导入导出 / 端口转发后补齐的覆盖（见 1.1、8.1、8.2）：
+ *      三项功能的入口与接口在打包产物中确实不存在、
+ *      编辑连接回显已保存凭据（含「小眼睛」明文切换与「不改动保存不误清」）、
+ *      弹窗遮罩只在按下与松开都落在遮罩本身时才关闭（ConnectionForm / HostKeyDialog / 移动到分组）
  *
  * 注意：脚本优先使用 dist/win-unpacked 下的打包产物，若该产物早于本轮源码改动，
  * 新增用例会因为跑的是旧代码而失败；验证新代码前请先把 dist 目录改名让脚本回退到 out/ 开发态。
@@ -28,7 +32,6 @@ const { Server, Client, utils } = require('ssh2')
 const { spawn, spawnSync } = require('child_process')
 const { createHash } = require('crypto')
 const fs = require('fs')
-const net = require('net')
 const os = require('os')
 const path = require('path')
 const { generateHostKey } = require('./host-key.cjs')
@@ -39,8 +42,6 @@ const CDP_PORT = 9333
 const LOG_FILE = path.join(PROJECT_ROOT, 'e2e-electron.log')
 /** 假想目标机的 home 目录，与内存文件系统保持一致 */
 const FAKE_HOME = '/home'
-/** 端口转发用例使用的本地监听端口（避开仓库默认的 2222/9333 与 ui-shot 的 2323/9455） */
-const FORWARD_TUNNEL_PORT = 15210
 /** 大目录用例的文件数量：验证虚拟滚动不会把 2000 行都塞进 DOM */
 const MANY_FILES = 2000
 
@@ -405,21 +406,6 @@ function startTestServer(hostKey) {
         // SFTP 面板用例需要真实 sftp 子系统
         session.on('sftp', (acceptSftp) => serveSftp(acceptSftp()))
       })
-
-      // 端口转发用例需要 direct-tcpip：服务端按请求的目标端口真实连过去
-      // 注意服务端侧的事件名是 'tcpip'（客户端侧才叫 'tcp connection'）
-      client.on('tcpip', (accept, reject, info) => {
-        const target = net.connect({ host: '127.0.0.1', port: info.destPort })
-        target.once('connect', () => {
-          const channel = accept()
-          channel.pipe(target).pipe(channel)
-          channel.on('close', () => target.destroy())
-        })
-        target.once('error', () => {
-          reject()
-          target.destroy()
-        })
-      })
     })
   })
   return listenOnTestPort(server)
@@ -478,71 +464,6 @@ function closeServer(server) {
       }
     }
     setTimeout(finish, 1000)
-  })
-}
-
-/**
- * 启动一个本地回显服务，作为端口转发用例的隧道目标。
- * @returns {Promise<{port: number, close: () => Promise<void>}>} 服务句柄
- */
-function startEchoService() {
-  const server = net.createServer((socket) => {
-    socket.write('E2E-TARGET-HELLO\n')
-    socket.on('data', (chunk) => socket.write(chunk))
-    socket.on('error', () => socket.destroy())
-  })
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      resolve({
-        port: server.address().port,
-        close: () => new Promise((done) => server.close(() => done()))
-      })
-    })
-  })
-}
-
-/**
- * 探测端口能否重新绑定，用于验证转发规则停止后端口真的释放。
- * @param {number} port 端口
- * @returns {Promise<boolean>} 是否可监听
- */
-function tryListen(port) {
-  return new Promise((resolve) => {
-    const probe = net.createServer()
-    probe.once('error', () => resolve(false))
-    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)))
-  })
-}
-
-/**
- * 通过隧道端口做一次请求-应答，确认数据真的穿过了 SSH 通道。
- * @param {number} port 本地监听端口
- * @param {string} payload 待发送文本
- * @param {number} timeout 超时毫秒数
- * @returns {Promise<string>} 收到的全部文本
- */
-function exchangeThroughTunnel(port, payload, timeout = 8000) {
-  return new Promise((resolve, reject) => {
-    const socket = net.connect({ host: '127.0.0.1', port })
-    const chunks = []
-    const timer = setTimeout(() => {
-      socket.destroy()
-      reject(new Error(`隧道数据往返超时：${payload}`))
-    }, timeout)
-    socket.on('data', (chunk) => {
-      chunks.push(chunk)
-      const text = Buffer.concat(chunks).toString('utf8')
-      if (text.includes(payload)) {
-        clearTimeout(timer)
-        socket.end()
-        resolve(text)
-      }
-    })
-    socket.once('connect', () => socket.write(payload))
-    socket.once('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
-    })
   })
 }
 
@@ -777,45 +698,82 @@ window.__e2eUI = {
     return document.querySelector('.sftp-panel:not(.hidden) ' + selector) ||
       document.querySelector('.terminal-host:not(.hidden) ' + selector)
   },
-  // 端口转发表单：按字段名（label 里的首个 span 文案）设置输入框
-  setFwdField(labelText, value) {
-    const fields = Array.from(document.querySelectorAll('.fwd-form .fwd-field'))
-    const field = fields.find((item) => {
-      const span = item.querySelector('span')
-      return span && span.textContent.trim() === labelText
+  // 按名称定位侧栏连接项：名称取 .conn-name 的文本（已连接时内含一个无文字的绿点）
+  findConnection(name) {
+    const item = Array.from(document.querySelectorAll('.conn-item')).find((el) => {
+      const label = el.querySelector('.conn-name')
+      return label && this.normalizeText(label.textContent).trim() === name
     })
-    if (!field) throw new Error('未找到转发表单字段：' + labelText)
-    const input = field.querySelector('input')
-    if (!input) throw new Error('转发表单字段没有输入框：' + labelText)
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value)
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    return input.value
+    if (!item) throw new Error('未找到连接项：' + name)
+    return item
   },
-  // 端口转发表单：按字段名设置下拉框（连接 / 类型）
-  setFwdSelect(labelText, optionValue) {
-    const fields = Array.from(document.querySelectorAll('.fwd-form .fwd-field'))
-    const field = fields.find((item) => {
-      const span = item.querySelector('span')
-      return span && span.textContent.trim() === labelText
-    })
-    if (!field) throw new Error('未找到转发表单下拉：' + labelText)
-    const select = field.querySelector('select')
-    if (!select) throw new Error('转发表单字段没有下拉框：' + labelText)
-    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(
-      select,
-      optionValue
+  // 点击连接项主体，走与用户一致的「点侧栏已保存连接开终端」路径
+  openConnection(name) {
+    const item = this.findConnection(name)
+    const main = item.querySelector('.conn-main')
+    if (!main) throw new Error('连接项没有打开入口：' + name)
+    main.click()
+    return true
+  },
+  // 点击连接项上的操作按钮（按 title 匹配，如「编辑」「SFTP 文件管理」）
+  clickConnectionAction(name, actionTitle) {
+    const item = this.findConnection(name)
+    const button = Array.from(item.querySelectorAll('.icon-btn')).find(
+      (el) => (el.getAttribute('title') || '') === actionTitle
     )
-    select.dispatchEvent(new Event('change', { bubbles: true }))
-    return select.value
+    if (!button) throw new Error('连接项「' + name + '」上没有按钮：' + actionTitle)
+    button.click()
+    return true
   },
-  fwdStatus() {
-    const el = document.querySelector('.fwd-status')
-    return el ? el.textContent.trim() : ''
+  // 读取弹窗表单里某个字段的输入框状态：值、类型、小眼睛按钮的 title 与 aria-pressed
+  fieldState(labelText) {
+    const field = Array.from(document.querySelectorAll('.modal .field')).find((item) => {
+      const span = item.querySelector('span')
+      return span && this.normalizeText(span.textContent).trim() === labelText
+    })
+    if (!field) throw new Error('未找到表单字段：' + labelText)
+    const input = field.querySelector('input')
+    if (!input) throw new Error('表单字段没有输入框：' + labelText)
+    const eye = field.querySelector('button.icon-btn')
+    return {
+      value: input.value,
+      type: input.type,
+      placeholder: input.placeholder,
+      hasEye: !!eye,
+      eyeTitle: eye ? eye.getAttribute('title') || '' : '',
+      eyePressed: eye ? eye.getAttribute('aria-pressed') : null
+    }
   },
-  fwdText() {
-    return Array.from(document.querySelectorAll('.fwd-row'))
-      .map((el) => el.textContent.trim())
-      .join(' || ')
+  // 点击字段右侧的小眼睛按钮（密码 / 私钥口令）
+  clickFieldEye(labelText) {
+    const field = Array.from(document.querySelectorAll('.modal .field')).find((item) => {
+      const span = item.querySelector('span')
+      return span && this.normalizeText(span.textContent).trim() === labelText
+    })
+    if (!field) throw new Error('未找到表单字段：' + labelText)
+    const eye = field.querySelector('button.icon-btn')
+    if (!eye) throw new Error('字段右侧没有小眼睛按钮：' + labelText)
+    eye.click()
+    return true
+  },
+  /**
+   * 模拟弹窗遮罩上的按下/松开组合，复现用户报的「在弹窗里长按后松手，弹窗消失」。
+   * kind='inside-to-mask'：在弹窗内按下，松开与 click 落到遮罩上（真实浏览器里 click 的目标
+   *   是按下点与松开点的最近公共祖先，也就是遮罩本身）；
+   * kind='mask-only'：按下、松开、click 全落在遮罩上。
+   */
+  maskGesture(kind) {
+    const mask = document.querySelector('.modal-mask')
+    if (!mask) throw new Error('页面上没有弹窗遮罩')
+    const inner = mask.querySelector('.modal')
+    if (!inner) throw new Error('弹窗遮罩里没有 .modal')
+    const fire = (target, type) =>
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }))
+    if (kind === 'inside-to-mask') fire(inner, 'mousedown')
+    else fire(mask, 'mousedown')
+    fire(mask, 'mouseup')
+    fire(mask, 'click')
+    return true
   },
   // 激活最后一个终端标签：新增用例会把激活标签切到 SFTP 面板，而屏幕文本只存在于可见终端里
   activateLastTerminalTab() {
@@ -830,6 +788,42 @@ window.__e2eUI = {
 }
 true;
 `
+
+/**
+ * 通过「新建连接」表单创建一条连接。
+ * 快速连接移除后，需要真实 UI 路径产生侧栏连接项时统一走这里：
+ * 表单提交会触发 App 的 refresh()，新连接立刻出现在侧栏里，不需要重载页面。
+ * @param {ReturnType<typeof connectCdp>} cdp CDP 客户端
+ * @param {{name: string, host: string, port: number, username: string, password?: string}} dto 连接要素
+ */
+async function createConnectionViaForm(cdp, dto) {
+  // 上一次用例可能留着弹窗，先关掉，避免字段定位到旧表单
+  if (await cdp.evaluate(`!!document.querySelector('.modal-title')`)) {
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '关闭残留弹窗')
+  }
+  await cdp.evaluate(`window.__e2eUI.click('.sidebar-head .primary-btn')`)
+  await waitForCondition(
+    cdp,
+    `document.querySelector('.modal-title')?.textContent === '新建连接'`,
+    `点击「+ 新建」打开连接表单（${dto.name}）`
+  )
+  await cdp.evaluate(`window.__e2eUI.setField('名称', ${JSON.stringify(dto.name)})`)
+  await cdp.evaluate(`window.__e2eUI.setField('主机', ${JSON.stringify(dto.host)})`)
+  await cdp.evaluate(`window.__e2eUI.setField('端口', ${JSON.stringify(String(dto.port))})`)
+  await cdp.evaluate(`window.__e2eUI.setField('用户名', ${JSON.stringify(dto.username)})`)
+  // 需要保存凭据时补填密码（默认认证方式就是密码）
+  if (dto.password) {
+    await cdp.evaluate(`window.__e2eUI.setField('密码', ${JSON.stringify(dto.password)})`)
+  }
+  await cdp.evaluate(`window.__e2eUI.click('.modal button[type="submit"]')`)
+  await waitForCondition(cdp, `!document.querySelector('.modal-title')`, `提交后弹窗关闭（${dto.name}）`)
+  await waitForCondition(
+    cdp,
+    `Array.from(document.querySelectorAll('.conn-name')).some((el) => el.textContent.includes(${JSON.stringify(dto.name)}))`,
+    `侧栏出现新连接「${dto.name}」（提交后列表自动刷新）`
+  )
+}
 
 /**
  * 采集终端渲染现场信息：终端容器尺寸、行数、屏幕文本与 IPC 层累计数据里的欢迎语次数。
@@ -866,9 +860,6 @@ async function main() {
   const fingerprintA = fingerprintOf(hostKeyA)
   let server = await startTestServer(hostKeyA)
   console.log(`[信息] 测试 SSH 服务已启动 127.0.0.1:${SSH_PORT}（主机密钥 A 指纹 ${fingerprintA}）`)
-  // 端口转发用例的隧道目标：本地回显服务，数据穿出隧道后应当原样回来
-  const echo = await startEchoService()
-  console.log(`[信息] 隧道目标回显服务已启动 127.0.0.1:${echo.port}`)
 
   // 优先用打包产物验证：它最接近用户双击运行的真实形态
   const packagedExe = path.join(PROJECT_ROOT, 'dist', 'win-unpacked', 'ssh-client.exe')
@@ -922,19 +913,48 @@ async function main() {
       'React 界面已挂载（侧边栏渲染成功）'
     )
 
-    // 2. 保存连接，验证 IPC + 加密落盘
-    const saved = await cdp.evaluate(`
-      window.api.connections.save({
-        name: 'E2E 测试机',
-        host: '127.0.0.1',
-        port: ${SSH_PORT},
-        username: 'tester',
-        authType: 'password',
-        password: 's3cret-pw'
-      })
-    `)
+    // 1.1 用户要求移除的三项功能不得在打包产物里留任何入口或接口
+    const removed = JSON.parse(
+      await cdp.evaluate(
+        `JSON.stringify({
+          quickConnect: !!document.querySelector('.quick-connect'),
+          sidebarActions: !!document.querySelector('.sidebar-actions'),
+          importButton: !!document.querySelector('.sidebar button[title*="导入"]'),
+          exportButton: !!document.querySelector('.sidebar button[title*="导出"]'),
+          importFn: typeof window.api.connections.importFromFile,
+          exportFn: typeof window.api.connections.exportToFile,
+          forwardApi: typeof window.api.forward
+        })`
+      )
+    )
+    assert(!removed.quickConnect, '侧栏不再有快速连接卡片（.quick-connect 不存在）')
+    assert(
+      !removed.sidebarActions && !removed.importButton && !removed.exportButton,
+      `侧栏不再有导入 / 导出操作行（现场 ${JSON.stringify(removed)}）`
+    )
+    assert(
+      removed.importFn === 'undefined' && removed.exportFn === 'undefined',
+      'window.api.connections 上不再暴露导入 / 导出接口'
+    )
+    assert(removed.forwardApi === 'undefined', 'window.api 上不再暴露端口转发接口（forward:*）')
+
+    // 2. 保存连接，验证 IPC + 加密落盘。
+    //    快速连接移除后，后续用例都走「点侧栏已保存连接」的真实 UI 路径，因此这里改用
+    //    「新建连接」表单保存（底层仍是同一个 connections.save IPC），侧栏才会立刻出现连接项
+    await createConnectionViaForm(cdp, {
+      name: 'E2E 测试机',
+      host: '127.0.0.1',
+      port: SSH_PORT,
+      username: 'tester',
+      password: 's3cret-pw'
+    })
+    const saved = JSON.parse(
+      await cdp.evaluate(
+        `(async () => JSON.stringify((await window.api.connections.list()).find((vo) => vo.name === 'E2E 测试机') ?? null))()`
+      )
+    )
     if (!saved?.id) throw new Error('保存连接未返回 id')
-    pass(`连接保存成功（id=${saved.id.slice(0, 8)}…）`)
+    pass(`连接通过「新建」表单保存成功（id=${saved.id.slice(0, 8)}…）`)
 
     // Runtime.evaluate 的表达式不支持顶层 await，需要包一层 async IIFE 再配合 awaitPromise
     const listJson = await cdp.evaluate(
@@ -999,31 +1019,20 @@ async function main() {
     await waitForCondition(cdp, `window.__e2e.exit !== null`, '关闭会话后收到退出事件')
 
     // -----------------------------------------------------------------------
-    // 7. 快速连接：写入地址回车，应真实连上测试服务并出现新标签
+    // 7. 打开已保存会话：点击侧栏里的连接项，应真实连上测试服务并出现新标签
+    //    （快速连接已按用户要求移除，这里改为点击已保存连接的 UI 路径）
     // -----------------------------------------------------------------------
-    const quickAddress = `127.0.0.1:${SSH_PORT}`
     const sessionsBefore = await cdp.evaluate(`window.__e2e.sessions.length`)
-    await cdp.evaluate(
-      `window.__e2eUI.setValue('.quick-connect input', ${JSON.stringify(quickAddress)})`
-    )
-    const quickInputValue = await cdp.evaluate(
-      `document.querySelector('.quick-connect input').value`
-    )
-    if (quickInputValue !== quickAddress) {
-      throw new Error(`快速连接输入框未被驱动，期望 ${quickAddress}，实际 ${quickInputValue}`)
-    }
-    pass('快速连接输入框可写入地址（React 受控输入被正确驱动）')
-
-    await cdp.evaluate(`window.__e2eUI.pressEnter('.quick-connect input')`)
+    await cdp.evaluate(`window.__e2eUI.openConnection('E2E 测试机')`)
     await waitForCondition(
       cdp,
-      `window.__e2eUI.tabs().some((title) => title.includes('@127.0.0.1'))`,
-      '快速连接回车后出现新终端标签'
+      `window.__e2eUI.tabs().some((title) => title.includes('E2E 测试机'))`,
+      '点击侧栏已保存连接后出现新终端标签'
     )
-    const quickTitle = await cdp.evaluate(
-      `window.__e2eUI.tabs().find((title) => title.includes('@127.0.0.1'))`
+    const openedTitle = await cdp.evaluate(
+      `window.__e2eUI.tabs().find((title) => title.includes('E2E 测试机'))`
     )
-    console.log(`[信息] 快速连接标签标题：${quickTitle}`)
+    console.log(`[信息] 点击已保存连接打开的标签标题：${openedTitle}`)
 
     // 建成后首屏输出必须落到终端：远端欢迎语在会话建立瞬间发出，早于终端组件挂载
     // （lead 已在 App 层做「写入函数注册前的输出缓冲 + 注册时回放」）
@@ -1035,9 +1044,9 @@ async function main() {
       ))
     ) {
       const state = await dumpScreenState(cdp)
-      throw new Error(`快速连接后终端未显示远端欢迎语（首屏输出丢失）：现场=${state}`)
+      throw new Error(`点击已保存连接后终端未显示远端欢迎语（首屏输出丢失）：现场=${state}`)
     }
-    pass('快速连接的终端显示远端欢迎语（首屏输出未丢失）')
+    pass('点击已保存连接打开的终端显示远端欢迎语（首屏输出未丢失）')
 
     // 通过 onData 登记过的会话 id 定位刚打开的这个终端
     await waitForCondition(
@@ -1051,15 +1060,15 @@ async function main() {
     }
     pass(`新终端会话 id 可定位（${String(activeSessionId).slice(0, 8)}…）`)
 
-    const quickEchoMarker = 'E2E-QUICK-ECHO-OK'
+    const savedEchoMarker = 'E2E-SAVED-ECHO-OK'
     await cdp.evaluate(
       `window.api.terminal.write(${JSON.stringify(activeSessionId)}, ${JSON.stringify(
-        `echo ${quickEchoMarker}\n`
+        `echo ${savedEchoMarker}\n`
       )}), true`
     )
     await waitForCondition(
       cdp,
-      `window.__e2eUI.screenText().includes('${quickEchoMarker}')`,
+      `window.__e2eUI.screenText().includes('${savedEchoMarker}')`,
       '终端挂载后的远端输出能写入并渲染到界面'
     )
 
@@ -1104,6 +1113,101 @@ async function main() {
     )
 
     // -----------------------------------------------------------------------
+    // 8.1 编辑连接回显已保存凭据：回显 → 小眼睛切明文 → 不改动保存后凭据未被误清
+    // -----------------------------------------------------------------------
+    await cdp.evaluate(`window.__e2eUI.clickConnectionAction('E2E 测试机', '编辑')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '编辑连接'`,
+      '点击「编辑」打开编辑连接表单'
+    )
+    // 凭据回显走异步 IPC（connections.getCredential），等密码框拿到值再断言
+    // （表达式自带 try/catch：字段尚未渲染时返回 false 继续轮询，而不是直接抛错）
+    const passwordEchoed = `(() => {
+      try {
+        return window.__e2eUI.fieldState('密码').value === 's3cret-pw'
+      } catch {
+        return false
+      }
+    })()`
+    await waitForCondition(cdp, passwordEchoed, '编辑表单回显了已保存的密码（密码框 value 非空）')
+    const pwdMasked = JSON.parse(
+      await cdp.evaluate(`JSON.stringify(window.__e2eUI.fieldState('密码'))`)
+    )
+    if (pwdMasked.type !== 'password') {
+      throw new Error(`密码框初始应为掩码类型，实际 type=${pwdMasked.type}`)
+    }
+    if (pwdMasked.eyePressed !== 'false' || !pwdMasked.eyeTitle.includes('显示')) {
+      throw new Error(`小眼睛初始态不符：${JSON.stringify(pwdMasked)}`)
+    }
+    pass(`密码框默认掩码显示，小眼睛提示「${pwdMasked.eyeTitle}」（aria-pressed=false）`)
+
+    await cdp.evaluate(`window.__e2eUI.clickFieldEye('密码')`)
+    const pwdShown = JSON.parse(
+      await cdp.evaluate(`JSON.stringify(window.__e2eUI.fieldState('密码'))`)
+    )
+    if (pwdShown.type !== 'text' || pwdShown.value !== 's3cret-pw') {
+      throw new Error(`点小眼睛后未切到明文：${JSON.stringify(pwdShown)}`)
+    }
+    if (pwdShown.eyePressed !== 'true' || !pwdShown.eyeTitle.includes('隐藏')) {
+      throw new Error(`小眼睛按下态未同步：${JSON.stringify(pwdShown)}`)
+    }
+    pass(`点小眼睛后密码框切明文且内容为真实密码（type=text，aria-pressed=true）`)
+
+    await cdp.evaluate(`window.__e2eUI.clickFieldEye('密码')`)
+    const pwdBack = JSON.parse(
+      await cdp.evaluate(`JSON.stringify(window.__e2eUI.fieldState('密码'))`)
+    )
+    if (pwdBack.type !== 'password' || pwdBack.eyePressed !== 'false') {
+      throw new Error(`再次点小眼睛未切回掩码：${JSON.stringify(pwdBack)}`)
+    }
+    pass('再次点小眼睛切回掩码（type=password，aria-pressed=false）')
+
+    // 不改密码直接保存：留空的语义必须是「保留已保存的密码」，不能变成清空
+    await cdp.evaluate(`window.__e2eUI.click('.modal button[type="submit"]')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '不改动直接保存后弹窗关闭')
+    const credentialAfterSave = await cdp.evaluate(
+      `(async () => JSON.stringify(await window.api.connections.getCredential(${JSON.stringify(saved.id)})))()`
+    )
+    if (!credentialAfterSave.includes('s3cret-pw')) {
+      throw new Error(`不改动保存后凭据被清掉了：getCredential 返回 ${credentialAfterSave}`)
+    }
+    pass(`不改动保存后凭据仍在（getCredential 回读 ${credentialAfterSave}）`)
+
+    await cdp.evaluate(`window.__e2eUI.clickConnectionAction('E2E 测试机', '编辑')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '编辑连接'`,
+      '再次打开编辑表单（验证回显未被误清）'
+    )
+    await waitForCondition(
+      cdp,
+      passwordEchoed,
+      '再次打开编辑表单仍回显已保存的密码（未被误清）'
+    )
+
+    // -----------------------------------------------------------------------
+    // 8.2 弹窗遮罩只在「按下与松开都落在遮罩本身」时才关闭
+    //     （修用户报的「在弹窗里长按后松手，弹窗消失」）
+    // -----------------------------------------------------------------------
+    const openModalTitle = `document.querySelector('.modal-title')?.textContent ?? ''`
+    // 在弹窗内按下（用户场景：在输入框里长按/拖选文字），松开与 click 落到遮罩上：不得关闭
+    await cdp.evaluate(`window.__e2eUI.maskGesture('inside-to-mask')`)
+    await sleep(200)
+    if ((await cdp.evaluate(openModalTitle)) !== '编辑连接') {
+      throw new Error('在弹窗内按下、在遮罩上松手时弹窗被误关（用户报告的缺陷）')
+    }
+    pass('在弹窗内按下、在遮罩上松手不会误关弹窗（仍为「编辑连接」）')
+
+    // 全程落在遮罩上：应当关闭
+    await cdp.evaluate(`window.__e2eUI.maskGesture('mask-only')`)
+    await waitForCondition(
+      cdp,
+      `!document.querySelector('.modal-title')`,
+      '按下与松开都落在遮罩上时弹窗正常关闭'
+    )
+
+    // -----------------------------------------------------------------------
     // 9. SFTP 路径栏：打开面板后可编辑跳转
     // -----------------------------------------------------------------------
     await cdp.evaluate(`window.__e2eUI.click('.conn-item .icon-btn[title="SFTP 文件管理"]')`)
@@ -1133,8 +1237,15 @@ async function main() {
 
     // -----------------------------------------------------------------------
     // 10. Toast：失败操作出现带分级类名的中文提示，点击可关闭
+    //     快速连接移除后，失败路径改为「新建一条指向未监听端口的连接，再点它开终端」
     // -----------------------------------------------------------------------
     const deadPort = 59998
+    await createConnectionViaForm(cdp, {
+      name: 'E2E 未监听端口',
+      host: '127.0.0.1',
+      port: deadPort,
+      username: 'tester'
+    })
     // 先点掉可能残留的成功提示，避免把旧提示当成本次失败的提示
     await cdp.evaluate(`(() => {
       const el = document.querySelector('.toast')
@@ -1142,10 +1253,7 @@ async function main() {
       return true
     })()`)
     await waitFor(cdp, `!document.querySelector('.toast')`, 3000)
-    await cdp.evaluate(
-      `window.__e2eUI.setValue('.quick-connect input', ${JSON.stringify(`127.0.0.1:${deadPort}`)})`
-    )
-    await cdp.evaluate(`window.__e2eUI.pressEnter('.quick-connect input')`)
+    await cdp.evaluate(`window.__e2eUI.openConnection('E2E 未监听端口')`)
     await waitForCondition(cdp, `!!document.querySelector('.toast')`, '连接不可用端口后出现 Toast 提示')
     const toastClass = await cdp.evaluate(`document.querySelector('.toast').className`)
     if (!/\berror\b/.test(toastClass)) {
@@ -1178,17 +1286,20 @@ async function main() {
     server = await startTestServer(hostKeyB)
     console.log(`[信息] 测试 SSH 服务已更换主机密钥并重启（指纹 B ${fingerprintB}）`)
 
-    // 用与前面不同的用户名，保证底层连接复用键不同、必须重新握手
-    const hostKeyAddress = `e2e-hk@127.0.0.1:${SSH_PORT}`
+    // 主机密钥变更流程需要一条指向测试 SSH 服务的已保存连接：先按真实 UI 建好，
+    // 再点它开会话。这条连接此前从未连接过，复用键（连接 id）在连接池里不存在，必然重新握手
+    await createConnectionViaForm(cdp, {
+      name: 'E2E 密钥变更机',
+      host: '127.0.0.1',
+      port: SSH_PORT,
+      username: 'e2e-hk'
+    })
     const hkSessionsBefore = await cdp.evaluate(`window.__e2e.sessions.length`)
-    await cdp.evaluate(
-      `window.__e2eUI.setValue('.quick-connect input', ${JSON.stringify(hostKeyAddress)})`
-    )
-    await cdp.evaluate(`window.__e2eUI.pressEnter('.quick-connect input')`)
+    await cdp.evaluate(`window.__e2eUI.openConnection('E2E 密钥变更机')`)
     await waitForCondition(
       cdp,
       `document.querySelector('.modal-title')?.textContent === '主机密钥已变更'`,
-      '主机密钥变更后弹出确认弹窗'
+      '点击已保存连接后弹出主机密钥变更确认弹窗'
     )
     const shownOld = await cdp.evaluate(`document.querySelector('.fp-value.old').textContent`)
     const shownNew = await cdp.evaluate(`document.querySelector('.fp-value.new').textContent`)
@@ -1203,6 +1314,17 @@ async function main() {
     }
     pass('未确认前 known_hosts.json 仍保存旧指纹，没有静默信任')
 
+    // 11.0 主机密钥弹窗同样只认「按下与松开都落在遮罩上」：在弹窗内按下、遮罩上松手不得关闭
+    await cdp.evaluate(`window.__e2eUI.maskGesture('inside-to-mask')`)
+    await sleep(200)
+    if (
+      (await cdp.evaluate(`document.querySelector('.modal-title')?.textContent ?? ''`)) !==
+      '主机密钥已变更'
+    ) {
+      throw new Error('主机密钥弹窗在「弹窗内按下、遮罩上松手」时被误关')
+    }
+    pass('主机密钥弹窗不会因在弹窗内按下、遮罩上松手而误关')
+
     // 11.x 用户先取消弹窗：待确认记录仍然存在，随后用于验证「服务端下线不得误报密钥变更」
     await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消连接')`)
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '取消连接后弹窗关闭')
@@ -1214,11 +1336,7 @@ async function main() {
     // 11.y 待确认记录存在时让服务端下线：必须给中文 ECONNREFUSED，不得再弹「主机密钥已变更」
     await closeServer(server)
     server = null
-    const offlineAddress = `e2e-hk-offline@127.0.0.1:${SSH_PORT}`
-    await cdp.evaluate(
-      `window.__e2eUI.setValue('.quick-connect input', ${JSON.stringify(offlineAddress)})`
-    )
-    await cdp.evaluate(`window.__e2eUI.pressEnter('.quick-connect input')`)
+    await cdp.evaluate(`window.__e2eUI.openConnection('E2E 密钥变更机')`)
     await waitForCondition(
       cdp,
       `!!document.querySelector('.toast.error')`,
@@ -1237,10 +1355,7 @@ async function main() {
 
     // 11.z 服务端恢复（仍是密钥 B）后重连：待确认记录应再次触发确认弹窗
     server = await startTestServer(hostKeyB)
-    await cdp.evaluate(
-      `window.__e2eUI.setValue('.quick-connect input', ${JSON.stringify(hostKeyAddress)})`
-    )
-    await cdp.evaluate(`window.__e2eUI.pressEnter('.quick-connect input')`)
+    await cdp.evaluate(`window.__e2eUI.openConnection('E2E 密钥变更机')`)
     await waitForCondition(
       cdp,
       `document.querySelector('.modal-title')?.textContent === '主机密钥已变更'`,
@@ -1256,7 +1371,7 @@ async function main() {
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '确认信任后弹窗关闭')
     await waitForCondition(
       cdp,
-      `window.__e2eUI.tabs().some((title) => title.includes('e2e-hk@127.0.0.1'))`,
+      `window.__e2eUI.tabs().some((title) => title.includes('E2E 密钥变更机'))`,
       '确认信任后自动重连成功并新建标签'
     )
     // 重连后的终端也应看到欢迎语（同 7b 的缓冲回放路径）
@@ -1298,8 +1413,8 @@ async function main() {
     // -----------------------------------------------------------------------
     // 12. 其它本轮新增交互的冒烟检查：窗口标题、连接搜索过滤、复制连接、右键菜单、字号持久化
     // -----------------------------------------------------------------------
-    // 12.1 窗口标题跟随当前标签
-    if (!(await waitFor(cdp, `document.title === 'e2e-hk@127.0.0.1 · SSH 客户端'`, 5000))) {
+    // 12.1 窗口标题跟随当前标签（标签标题是已保存连接的名称）
+    if (!(await waitFor(cdp, `document.title === 'E2E 密钥变更机 · SSH 客户端'`, 5000))) {
       const currentTitle = await cdp.evaluate(`document.title`)
       throw new Error(`窗口标题未跟随当前标签，实际=${currentTitle}`)
     }
@@ -1496,6 +1611,16 @@ async function main() {
       `document.querySelector('.modal-title')?.textContent === '移动到分组'`,
       '点击「移动到分组…」打开分组弹窗'
     )
+    // 12.7a 第三个带遮罩的弹窗同样只在「按下与松开都落在遮罩上」时才关闭
+    await cdp.evaluate(`window.__e2eUI.maskGesture('inside-to-mask')`)
+    await sleep(200)
+    if (
+      (await cdp.evaluate(`document.querySelector('.modal-title')?.textContent ?? ''`)) !==
+      '移动到分组'
+    ) {
+      throw new Error('移动到分组弹窗在「弹窗内按下、遮罩上松手」时被误关')
+    }
+    pass('移动到分组弹窗不会因在弹窗内按下、遮罩上松手而误关')
     await cdp.evaluate(`window.__e2eUI.setField('分组名', 'E2E 分组')`)
     await cdp.evaluate(`window.__e2eUI.click('.modal-foot button[type="submit"]')`)
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '保存分组后弹窗关闭')
@@ -1530,38 +1655,9 @@ async function main() {
     )
 
     // -----------------------------------------------------------------------
-    // 12.8 导入 / 导出：入口按钮与 window.api 链路（原生文件对话框无法用 CDP 驱动）
-    // 文件级行为（解析、跳过、导出不含凭据）由 scripts/verify-config-io.cjs 用真实代码覆盖
+    // 12.8 导入 / 导出：该功能已按用户要求移除，相关用例与 verify-config-io.cjs 一并删除，
+    //      编号不复用，便于与历史报告对照
     // -----------------------------------------------------------------------
-    const importExport = JSON.parse(
-      await cdp.evaluate(
-        `JSON.stringify({
-          importButton: !!document.querySelector('.sidebar-actions button[title="从 OpenSSH 配置或 JSON 文件导入"]'),
-          exportButton: !!document.querySelector('.sidebar-actions button[title="导出全部连接（不含任何凭据）"]'),
-          importText: (document.querySelector('.sidebar-actions button[title="从 OpenSSH 配置或 JSON 文件导入"]') || {}).textContent,
-          exportText: (document.querySelector('.sidebar-actions button[title="导出全部连接（不含任何凭据）"]') || {}).textContent,
-          importFn: typeof window.api.connections.importFromFile,
-          exportFn: typeof window.api.connections.exportToFile,
-          assignGroupFn: typeof window.api.connections.assignGroup
-        })`
-      )
-    )
-    assert(
-      importExport.importButton && importExport.exportButton,
-      '侧栏存在「导入」「导出」入口按钮'
-    )
-    assert(
-      importExport.importText.includes('导入') && importExport.exportText.includes('导出'),
-      `入口按钮文案正确（${importExport.importText.trim()} / ${importExport.exportText.trim()}）`
-    )
-    assert(
-      importExport.importFn === 'function' &&
-        importExport.exportFn === 'function' &&
-        importExport.assignGroupFn === 'function',
-      'window.api.connections 上导入 / 导出 / 分组接口均可调用（预加载链路已接通）'
-    )
-    // 不点击这两个按钮：主进程会弹原生文件对话框，CDP 无法关闭它，会挂住后续用例
-    console.log('[信息] 导入导出的原生对话框未在 e2e 中触发，文件级行为由 verify-config-io.cjs 覆盖')
 
     // -----------------------------------------------------------------------
     // 12.9 SFTP 列宽拖拽：拖动改变列宽、表头与数据行对齐、最小宽度钳制、双击复位
@@ -1781,54 +1877,8 @@ async function main() {
     memfs.set(`${FAKE_HOME}/readme.txt`, readmeNode)
 
     // -----------------------------------------------------------------------
-    // 12.12 端口转发面板：启动一条 local 规则、真实穿透隧道、停止后端口释放
+    // 12.12 端口转发面板：该功能已按用户要求移除，相关用例与 verify-forward.cjs 一并删除
     // -----------------------------------------------------------------------
-    await cdp.evaluate(`window.__e2eUI.click('.sidebar-actions button[title="端口转发"]')`)
-    await waitForCondition(
-      cdp,
-      `document.querySelector('.modal-title')?.textContent === '端口转发'`,
-      '点击「隧道」打开端口转发面板'
-    )
-    await cdp.evaluate(
-      `window.__e2eUI.setFwdSelect('连接', ${JSON.stringify(saved.id)})`
-    )
-    await cdp.evaluate(`window.__e2eUI.setFwdSelect('类型', 'local')`)
-    await cdp.evaluate(`window.__e2eUI.setFwdField('本地监听端口', '${FORWARD_TUNNEL_PORT}')`)
-    await cdp.evaluate(`window.__e2eUI.setFwdField('目标地址（远端可达）', '127.0.0.1')`)
-    await cdp.evaluate(`window.__e2eUI.setFwdField('目标端口', '${echo.port}')`)
-    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-actions button', '启动转发')`)
-    await waitForCondition(
-      cdp,
-      `window.__e2eUI.fwdStatus() === '运行中'`,
-      '启动后规则状态为「运行中」'
-    )
-    const tunnelText = await exchangeThroughTunnel(
-      FORWARD_TUNNEL_PORT,
-      'E2E-本地转发中文往返'
-    )
-    assert(
-      tunnelText.includes('E2E-TARGET-HELLO') && tunnelText.includes('E2E-本地转发中文往返'),
-      `隧道双向数据完整（收到 ${JSON.stringify(tunnelText.trim())}）`
-    )
-    await waitForCondition(
-      cdp,
-      `window.__e2eUI.fwdText().includes('连接 1')`,
-      '面板累计连接数变为 1（隧道确实在工作）'
-    )
-    await cdp.evaluate(`window.__e2eUI.clickByText('.fwd-actions button', '停止')`)
-    await waitForCondition(
-      cdp,
-      `window.__e2eUI.fwdStatus() === '已停止'`,
-      '点击「停止」后规则状态变为「已停止」'
-    )
-    let released = false
-    for (let attempt = 0; attempt < 20 && !released; attempt += 1) {
-      released = await tryListen(FORWARD_TUNNEL_PORT)
-      if (!released) await sleep(100)
-    }
-    assert(released, `停止后本地监听端口 ${FORWARD_TUNNEL_PORT} 已释放（可以重新绑定）`)
-    await cdp.evaluate(`window.__e2eUI.click('.modal-foot button')`)
-    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '关闭端口转发面板')
 
     // -----------------------------------------------------------------------
     // 13. 终端搜索：Ctrl+F 展开搜索栏，命中计数随关键词变化
@@ -2094,7 +2144,6 @@ async function main() {
     // Electron 会派生多个子进程，按进程树强制结束
     spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
     await closeServer(server)
-    if (echo) await echo.close()
     await sleep(500)
     fs.rmSync(USER_DATA_DIR, { recursive: true, force: true })
   }

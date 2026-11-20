@@ -12,7 +12,6 @@ import WorkspaceTabs from './components/WorkspaceTabs'
 import Toast from './components/Toast'
 import HostKeyDialog from './components/HostKeyDialog'
 import SessionRestoreBar from './components/SessionRestoreBar'
-import ForwardPanel from './components/ForwardPanel'
 import { asHostKeyChanged, toMessage } from './utils'
 import type { AppTab, AppToast, TabSource, TerminalTab, ToastKind } from './types'
 
@@ -82,7 +81,6 @@ function App(): React.JSX.Element {
   const [session, setSession] = useState<SessionState>(EMPTY_SESSION)
   const [editor, setEditor] = useState<EditorState>(null)
   const [secureAvailable, setSecureAvailable] = useState(true)
-  const [defaultUsername, setDefaultUsername] = useState('')
   const [toast, setToast] = useState<AppToast | null>(null)
   /** 正在建立的连接描述，非空时在工作区顶部显示进度条 */
   const [pendingLabel, setPendingLabel] = useState<string | null>(null)
@@ -91,8 +89,6 @@ function App(): React.JSX.Element {
   /** 上次退出时留下的会话快照，非空时显示恢复提示条 */
   const [restore, setRestore] = useState<SessionSnapshotVO | null>(null)
   const [restoring, setRestoring] = useState(false)
-  /** 端口转发面板是否展开 */
-  const [forwardOpen, setForwardOpen] = useState(false)
 
   /** sessionId 到 xterm 写入函数，输出按会话精确分发，避免每个标签各自过滤全量数据 */
   const writers = useRef(new Map<string, (data: Uint8Array) => void>())
@@ -131,10 +127,6 @@ function App(): React.JSX.Element {
     window.api.system
       .secureAvailable()
       .then(setSecureAvailable)
-      .catch(() => undefined)
-    window.api.system
-      .defaultUsername()
-      .then(setDefaultUsername)
       .catch(() => undefined)
     // 上次退出时若还有会话，交给用户决定是否恢复（自动连服务器会让人意外）
     window.api.session
@@ -446,17 +438,6 @@ function App(): React.JSX.Element {
   }, [])
 
   /**
-   * 快速连接：用即时输入的连接信息直接开会话，不落盘。
-   * @param inline 临时连接配置
-   */
-  const quickConnect = useCallback(
-    (inline: SaveConnectionDTO): void => {
-      void openTerminal({ inline }, inline.name)
-    },
-    [openTerminal]
-  )
-
-  /**
    * 按快照逐个重开上次的标签。
    * 连接已被删除的标签会跳过，最后清掉快照避免下次再问。
    */
@@ -511,17 +492,14 @@ function App(): React.JSX.Element {
       <ConnectionList
         connections={connections}
         secureAvailable={secureAvailable}
-        defaultUsername={defaultUsername}
         activeIds={activeConnectionIds}
         onConnect={(vo) => void openTerminal({ connectionId: vo.id }, vo.name)}
         onOpenSftp={(vo) => void openSftp({ connectionId: vo.id }, vo.name)}
-        onQuickConnect={quickConnect}
         onCreate={() => setEditor({ mode: 'new' })}
         onDuplicate={duplicateConnection}
         onEdit={(vo) => setEditor({ mode: 'edit', vo })}
         onRemove={removeConnection}
         onNotify={showToast}
-        onOpenForward={() => setForwardOpen(true)}
       />
 
       <main className="workspace">
@@ -568,15 +546,6 @@ function App(): React.JSX.Element {
           busy={trusting}
           onTrust={() => void trustAndRetry()}
           onCancel={() => setHostKey(null)}
-        />
-      )}
-
-      {forwardOpen && (
-        <ForwardPanel
-          open={forwardOpen}
-          connections={connections}
-          onNotify={showToast}
-          onClose={() => setForwardOpen(false)}
         />
       )}
 
