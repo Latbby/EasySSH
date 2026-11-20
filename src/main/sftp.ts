@@ -1,6 +1,8 @@
 import { dialog } from 'electron'
 import { randomUUID } from 'crypto'
+import { createReadStream, createWriteStream, existsSync, renameSync, statSync } from 'fs'
 import { basename } from 'path'
+import type { Writable } from 'stream'
 import type { FileEntry, SFTPWrapper, Stats } from 'ssh2'
 import type {
   OpenSftpVO,
@@ -51,44 +53,123 @@ function entryType(mode: number): SftpEntryType {
   return 'file'
 }
 
+/** 进度上报器，上传与下载共用同一套 VO 语义 */
+interface ProgressReporter {
+  /** 标记本次传输从断点续传开始，首次上报会带上 resumed */
+  markResumed(): void
+  /**
+   * 上报一次进度。
+   * @param transferred 累计已传输字节数（含断点之前已完成的部分）
+   * @param total 文件总大小
+   * @param done 该文件是否已传完
+   */
+  report(transferred: number, total: number, done: boolean): void
+}
+
 /**
- * 执行一次带进度的文件传输。
- * ssh2 的 step 回调签名为 (已传输字节数, 本次分片字节数, 文件总大小)，其中文件总大小来自源文件的 stat，
- * 取不到时为 undefined，这里按 0 处理（渲染进程约定 total 为 0 表示大小未知）；
- * 结束时额外补一条 done 记录——空文件不会有任何 step 回调。
+ * 创建进度上报器。
+ * transferred 为累计字节、total 为文件总大小、done 标记结束，与渲染进程进度条约定一致。
  * @param direction 传输方向
  * @param base 进度出参中的固定字段：会话 id 与文件名
  * @param onTransfer 进度回调，未提供时只做传输不上报
- * @param start 真正发起传输，入参为 step 回调与完成回调
- * @returns 传输完成的 Promise，失败时抛中文化错误
+ * @returns 上报器
  */
-function transferFile(
+function createReporter(
   direction: 'upload' | 'download',
   base: { sftpId: string; name: string },
-  onTransfer: ((vo: SftpTransferVO) => void) | undefined,
-  start: (
-    step: (transferred: number, chunk: number, total?: number) => void,
-    done: (err?: Error | null) => void
-  ) => void
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    let transferred = 0
-    let total = 0
-    start(
-      (current, _chunk, size) => {
-        transferred = current
-        total = typeof size === 'number' ? size : 0
-        onTransfer?.({ ...base, direction, transferred, total, done: false })
-      },
-      (err) => {
-        if (err) {
-          reject(toReadableError(err, direction === 'upload' ? '上传文件' : '下载文件'))
-          return
-        }
-        onTransfer?.({ ...base, direction, transferred, total, done: true })
-        resolve()
+  onTransfer?: (vo: SftpTransferVO) => void
+): ProgressReporter {
+  let resumed = false
+  let reported = false
+  return {
+    markResumed: () => {
+      resumed = true
+    },
+    report: (transferred, total, done) => {
+      if (!onTransfer) return
+      const vo: SftpTransferVO = { ...base, direction, transferred, total, done }
+      // resumed 只随首次上报发出：后续每条进度都带会让渲染进程反复提示「已续传」
+      if (resumed && !reported) vo.resumed = true
+      reported = true
+      onTransfer(vo)
+    }
+  }
+}
+
+/**
+ * 读取远端文件大小。
+ * @param sftp SFTP 通道
+ * @param remotePath 远端绝对路径
+ * @returns 文件字节数；文件不存在或读取失败时返回 -1
+ */
+function remoteFileSize(sftp: SFTPWrapper, remotePath: string): Promise<number> {
+  return new Promise((resolve) => {
+    sftp.stat(remotePath, (err, stats) => resolve(err ? -1 : (stats.size ?? 0)))
+  })
+}
+
+/**
+ * 以截断方式在远端创建空文件。
+ * ssh2 的写流按 r+ 打开时要求目标已存在，所以首次上传（或断点作废重传）前先建出空文件，
+ * 这样后续「按偏移写入」的语义与 fastPut 的 w 一致，不会把旧内容留在文件尾部。
+ * @param sftp SFTP 通道
+ * @param remotePath 远端绝对路径
+ * @returns 空文件创建完成后的 Promise，失败时抛中文化错误
+ */
+function truncateRemote(sftp: SFTPWrapper, remotePath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    sftp.open(remotePath, 'w', (err, handle) => {
+      if (err) {
+        reject(toReadableError(err, `创建 ${remotePath}`))
+        return
       }
-    )
+      // 句柄必须显式关闭，否则远端会一直挂着一个打开的文件
+      sftp.close(handle, (closeErr) =>
+        closeErr ? reject(toReadableError(closeErr, `创建 ${remotePath}`)) : resolve()
+      )
+    })
+  })
+}
+
+/**
+ * 写入一块数据并等待写入确认。
+ * 回调在 ssh2 收到服务端 WRITE 应答（本地流则是落盘）之后触发，
+ * 因此按它累计出来的进度与断点都是真实的已写入字节。
+ * @param writer 目标写流
+ * @param chunk 数据块
+ * @returns 写入确认后完成的 Promise
+ */
+function writeChunk(writer: Writable, chunk: Buffer): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    writer.write(chunk, (err?: Error | null) => (err ? reject(err) : resolve()))
+  })
+}
+
+/**
+ * 收尾写流：结束写入并等待句柄关闭。
+ * 本地文件流必须等到 close 才能改名（Windows 上打开着的文件无法改名），ssh2 写流同样在句柄关闭后触发 close；
+ * 出错时以 Promise 拒绝的方式抛出，避免流上的 error 事件变成未捕获异常。
+ * @param writer 目标写流
+ * @returns 写流关闭后完成的 Promise
+ */
+function closeWriter(writer: Writable): Promise<void> {
+  // 已销毁的流不会再触发 close（ssh2 在出错时也不发），避免等一个永远不来的事件
+  if (writer.destroyed) return Promise.resolve()
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (err?: Error | null): void => {
+      if (settled) return
+      settled = true
+      writer.removeListener('error', onError)
+      writer.removeListener('close', onClose)
+      if (err) reject(err)
+      else resolve()
+    }
+    const onError = (err: Error): void => finish(err)
+    const onClose = (): void => finish()
+    writer.once('error', onError)
+    writer.once('close', onClose)
+    writer.end()
   })
 }
 
@@ -100,6 +181,12 @@ function transferFile(
 export class SftpManager {
   /** sftpId 到 SFTP 会话 */
   private sessions = new Map<string, SftpSession>()
+
+  /**
+   * 上传断点记录，key 为「会话 id|远端路径」，value 为该文件已确认写入远端的字节数。
+   * 只存在内存里：进程活着就能对中断的文件续传，重启后从头传，符合面板的会话语义。
+   */
+  private uploadOffsets = new Map<string, number>()
 
   /**
    * @param pool 共享的连接池
@@ -166,12 +253,25 @@ export class SftpManager {
     const session = this.sessions.get(sftpId)
     if (!session) return
     this.sessions.delete(sftpId)
+    // 会话关闭后断点记录不再有意义，一并清掉，避免长期运行攒下无用条目
+    for (const key of [...this.uploadOffsets.keys()]) {
+      if (key.startsWith(`${sftpId}|`)) this.uploadOffsets.delete(key)
+    }
     try {
       session.sftp.end()
     } catch {
       // 通道可能已由远端关闭，忽略
     }
     this.pool.release(session.connectionId)
+  }
+
+  /**
+   * 取出会话的 SFTP 通道，供主进程其它功能（如远程编辑）复用同一条 SFTP 会话。
+   * @param sftpId SFTP 会话 id
+   * @returns SFTP 通道
+   */
+  requireWrapper(sftpId: string): SFTPWrapper {
+    return this.require(sftpId).sftp
   }
 
   /**
@@ -231,17 +331,72 @@ export class SftpManager {
    * @returns 上传成功的文件名列表
    */
   async uploadPaths(dto: SftpUploadPathsDTO): Promise<string[]> {
-    const { sftp } = this.require(dto.sftpId)
+    const session = this.require(dto.sftpId)
     const uploaded: string[] = []
     // 逐个上传而非并发，避免多个大文件抢占同一条通道导致进度来回跳
     for (const localPath of dto.localPaths) {
       const name = basename(localPath)
-      await transferFile('upload', { sftpId: dto.sftpId, name }, this.onTransfer, (step, done) =>
-        sftp.fastPut(localPath, joinRemote(dto.remoteDir, name), { step }, done)
-      )
+      await this.putFile(session, joinRemote(dto.remoteDir, name), localPath, name)
       uploaded.push(name)
     }
     return uploaded
+  }
+
+  /**
+   * 上传单个本地文件，同一会话内对中断过的目标文件断点续传。
+   * 远端按 r+ 打开并从上次已确认写入的偏移继续写，本地文件流也从同一偏移开始读，
+   * 所以进度里的 transferred 是真实的累计字节，中断重试不会把已传部分再传一遍。
+   * @param session 目标 SFTP 会话
+   * @param remotePath 远端绝对路径
+   * @param localPath 本地文件绝对路径
+   * @param name 文件名，仅用于进度提示
+   */
+  private async putFile(
+    session: SftpSession,
+    remotePath: string,
+    localPath: string,
+    name: string
+  ): Promise<void> {
+    const { sftp } = session
+    const total = statSync(localPath).size
+    const key = `${session.id}|${remotePath}`
+    const record = this.uploadOffsets.get(key) ?? 0
+    let offset = Math.min(record, total)
+    // 远端可能在两次上传之间被改动过（同名文件被替换等），长度对不上时按原偏移续写会写坏文件，改为重传
+    if (offset > 0 && (await remoteFileSize(sftp, remotePath)) !== offset) offset = 0
+    // r+ 要求目标已存在，首次上传（或断点作废）时先建出空文件
+    if (offset === 0) await truncateRemote(sftp, remotePath)
+
+    const reporter = createReporter('upload', { sftpId: session.id, name }, this.onTransfer)
+    if (offset > 0) reporter.markResumed()
+
+    const reader = createReadStream(localPath, { start: offset })
+    const writer = sftp.createWriteStream(remotePath, { flags: 'r+', start: offset })
+    let written = offset
+    // 流上的错误必须有人接：ssh2 打开远端文件失败时会直接 emit error，无人监听会变成未捕获异常
+    let failure: Error | null = null
+    writer.on('error', (err: Error) => {
+      failure = err
+    })
+    try {
+      for await (const chunk of reader) {
+        if (failure) throw failure
+        await writeChunk(writer, chunk as Buffer)
+        written += (chunk as Buffer).length
+        // 每写成功一块就刷新断点，连接或进程中断后能从最近一次成功写入处接着传
+        this.uploadOffsets.set(key, written)
+        reporter.report(written, total, false)
+      }
+      if (failure) throw failure
+      await closeWriter(writer)
+    } catch (err) {
+      reader.destroy()
+      writer.destroy()
+      throw toReadableError(err, '上传文件')
+    }
+    // 传完才清掉断点记录：下次上传同一目标重新从头开始
+    this.uploadOffsets.delete(key)
+    reporter.report(total, total, true)
   }
 
   /**
@@ -260,10 +415,73 @@ export class SftpManager {
 
     const name = basename(remotePath)
     const localPath = target.filePath
-    await transferFile('download', { sftpId, name }, this.onTransfer, (step, done) =>
-      sftp.fastGet(remotePath, localPath, { step }, done)
-    )
+    // 先写到 <目标>.part：中断时保留半成品，正式文件要么不存在、要么是完整的，不会被半个文件覆盖
+    const partPath = `${localPath}.part`
+    const total = await remoteFileSize(sftp, remotePath)
+    if (total < 0) throw new Error(`远程文件不存在或无法读取：${remotePath}`)
+
+    // 只有 .part 比远端小才值得续传；不小于时说明上次已下完或内容是脏的，直接重下
+    let offset = 0
+    if (existsSync(partPath)) {
+      const done = statSync(partPath).size
+      if (done > 0 && done < total) offset = done
+    }
+
+    const reporter = createReporter('download', { sftpId, name }, this.onTransfer)
+    if (offset > 0) reporter.markResumed()
+    try {
+      await this.getFile(sftp, remotePath, partPath, offset, total, reporter)
+      // 传完才改名成正式文件，任何中断都只留下 .part
+      renameSync(partPath, localPath)
+    } catch (err) {
+      throw toReadableError(err, '下载文件')
+    }
+    reporter.report(total, total, true)
     return true
+  }
+
+  /**
+   * 从远端读取剩余内容并写入本地文件。
+   * @param sftp SFTP 通道
+   * @param remotePath 远端绝对路径
+   * @param localPath 本地目标路径（下载断点文件）
+   * @param offset 续传起点，即本地已下载的字节数
+   * @param total 远端文件总大小
+   * @param reporter 进度上报器
+   */
+  private async getFile(
+    sftp: SFTPWrapper,
+    remotePath: string,
+    localPath: string,
+    offset: number,
+    total: number,
+    reporter: ProgressReporter
+  ): Promise<void> {
+    const reader = sftp.createReadStream(remotePath, { start: offset })
+    // 续传时追加写入，否则新建（w 会先清掉上次残留的内容）
+    const writer = createWriteStream(localPath, { flags: offset > 0 ? 'a' : 'w' })
+    let written = offset
+    let failure: Error | null = null
+    reader.on('error', (err: Error) => {
+      failure = err
+    })
+    writer.on('error', (err: Error) => {
+      failure = err
+    })
+    try {
+      for await (const chunk of reader) {
+        if (failure) throw failure
+        await writeChunk(writer, chunk as Buffer)
+        written += (chunk as Buffer).length
+        reporter.report(written, total, false)
+      }
+      if (failure) throw failure
+      await closeWriter(writer)
+    } catch (err) {
+      reader.destroy()
+      writer.destroy()
+      throw err
+    }
   }
 
   /**
