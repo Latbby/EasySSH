@@ -18,19 +18,9 @@ afterPack: ./scripts/after-pack.cjs
 # 启动器随包分发，作为兜底：产物完整性标签无法重置时，双击 exe 会被降级为 Low 完整性
 # 级别并在创建窗口前静默退出，此时可用 start.bat / start.lnk（带 --no-sandbox）启动。
 # 标签正常时直接双击 exe 即可，见 scripts/after-pack.cjs。
-# start.lnk 与 exe 同目录，内部记录的是相对路径，因此整目录移动后依然有效。
+# start.lnk 由 scripts/make-start-lnk.ps1 在打包前按当前仓库位置生成（不入库：内部是绝对路径），
+# 内部记录的是相对路径，因此整目录移动后依然有效。
 # 注意：bat 必须保持纯 ASCII 内容，中文注释在 cmd 的 GBK 环境下会解析错乱导致脚本整体失效。
-extraFiles:
-  - from: build/start.lnk
-    to: start.lnk
-  - from: build/start.bat
-    to: start.bat
-  - from: build/run-debug.bat
-    to: run-debug.bat
-  # 运行说明随包分发：未签名产物会遇到 SmartScreen 与完整性标签两类"双击没反应"，
-  # 说明里给了自查与兜底启动方式，避免用户拿到包后无从下手
-  - from: build/运行说明.txt
-    to: 运行说明.txt
 win:
   executableName: EasySSH
   # 只产出免安装目录版（zip 会连同 win-unpacked 一起生成）。
@@ -39,6 +29,17 @@ win:
   # "NSIS Error: Error writing temporary file"，不如目录版可靠。
   target:
     - zip
+  extraFiles:
+    - from: build/start.lnk
+      to: start.lnk
+    - from: build/start.bat
+      to: start.bat
+    - from: build/run-debug.bat
+      to: run-debug.bat
+    # 运行说明随包分发：未签名产物会遇到 SmartScreen 与完整性标签两类"双击没反应"，
+    # 说明里给了自查与兜底启动方式，避免用户拿到包后无从下手
+    - from: build/运行说明.txt
+      to: 运行说明.txt
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}

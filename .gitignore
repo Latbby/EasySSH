@@ -7,3 +7,5 @@ out
 *.log*
 # 截图脚本产出的界面取证图（体积大，不入库，需要时用 scripts/ui-shot.cjs 重新生成）
 scripts/ui-shots
+# 由 scripts/make-start-lnk.ps1 在打包前生成（内部含绝对路径，不入库）
+build/start.lnk
