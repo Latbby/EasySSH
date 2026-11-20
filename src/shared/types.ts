@@ -23,6 +23,8 @@ export interface SaveConnectionDTO {
   privateKeyPath?: string
   /** 私钥口令；undefined 表示不修改，空串表示清除 */
   passphrase?: string
+  /** 分组名，空串或 undefined 表示未分组 */
+  group?: string
 }
 
 /** 连接列表出参，绝不包含任何形式的明文或密文凭据 */
@@ -37,6 +39,35 @@ export interface ConnectionVO {
   /** 是否已保存凭据 */
   hasCredential: boolean
   createdAt: number
+  /** 分组名，空串或 undefined 表示未分组 */
+  group?: string
+}
+
+/** 批量调整分组入参 */
+export interface AssignGroupDTO {
+  /** 目标连接 id 列表 */
+  ids: string[]
+  /** 目标分组名，空串表示移出分组 */
+  group: string
+}
+
+/** 导入结果出参 */
+export interface ImportResultVO {
+  /** 成功导入条数 */
+  imported: number
+  /** 因重复而跳过的条数 */
+  skipped: number
+  /** 逐条记录的跳过或失败原因，便于用户核对 */
+  errors: string[]
+}
+
+/** 导出结果出参 */
+export interface ExportResultVO {
+  exported: number
+  /** 实际写入的文件路径 */
+  path: string
+  /** 实际使用的格式，由保存框选择的扩展名决定 */
+  format: 'json' | 'openssh'
 }
 
 /** 打开终端入参，支持已保存连接与一次性临时连接 */
@@ -102,6 +133,76 @@ export interface SftpTransferVO {
   total: number
   /** 该文件是否已完成 */
   done: boolean
+  /** 本次传输是否从断点续传开始 */
+  resumed?: boolean
+}
+
+/** 远程文件编辑会话出参 */
+export interface EditSessionVO {
+  sftpId: string
+  /** 远程文件绝对路径 */
+  remotePath: string
+  /** 下载到的本地临时文件路径 */
+  localPath: string
+  /** 会话状态：已打开、已回传保存内容、出错 */
+  state: 'opened' | 'saved' | 'error'
+  /** 出错时的中文说明 */
+  message?: string
+}
+
+/** 端口转发类型：本地、远程、动态（SOCKS5） */
+export type ForwardType = 'local' | 'remote' | 'dynamic'
+
+/** 端口转发运行状态 */
+export type ForwardStatus = 'running' | 'stopped' | 'error'
+
+/** 新建端口转发规则入参 */
+export interface ForwardRuleDTO {
+  /** 为空表示新增 */
+  id?: string
+  /** 已保存连接 id，与 inline 二选一 */
+  connectionId?: string
+  /** 临时连接配置，不落盘 */
+  inline?: SaveConnectionDTO
+  type: ForwardType
+  /** 监听地址：local/dynamic 为本地地址，remote 为远端地址 */
+  localHost: string
+  /** 监听端口 */
+  localPort: number
+  /** 目标地址：local/remote 使用，dynamic 忽略 */
+  remoteHost?: string
+  /** 目标端口 */
+  remotePort?: number
+}
+
+/** 端口转发规则出参 */
+export interface ForwardRuleVO {
+  id: string
+  type: ForwardType
+  localHost: string
+  localPort: number
+  remoteHost?: string
+  remotePort?: number
+  /** 列表展示名：来源连接名 + 转发描述 */
+  title: string
+  status: ForwardStatus
+  /** 出错时的中文说明 */
+  message?: string
+  /** 累计成功转发的连接数，用于判断隧道是否真的在工作 */
+  connections: number
+}
+
+/** 会话恢复：单个标签的来源（只记录已保存连接的 id，绝不落盘凭据） */
+export interface SessionTabDTO {
+  kind: 'terminal' | 'sftp'
+  connectionId: string
+}
+
+/** 会话恢复快照 */
+export interface SessionSnapshotVO {
+  tabs: SessionTabDTO[]
+  /** 快照写入时间（毫秒时间戳） */
+  savedAt: number
 }
 
 /** 打开 SFTP 会话出参 */
@@ -119,6 +220,9 @@ export const IPC = {
   connList: 'conn:list',
   connSave: 'conn:save',
   connRemove: 'conn:remove',
+  connAssignGroup: 'conn:assign-group',
+  connImport: 'conn:import',
+  connExport: 'conn:export',
   secureAvailable: 'system:secure-available',
   pickPrivateKey: 'system:pick-private-key',
   defaultUsername: 'system:default-username',
@@ -140,7 +244,17 @@ export const IPC = {
   sftpMkdir: 'sftp:mkdir',
   sftpRemove: 'sftp:remove',
   sftpRename: 'sftp:rename',
-  sftpTransfer: 'sftp:transfer'
+  sftpTransfer: 'sftp:transfer',
+  sftpEdit: 'sftp:edit',
+  sftpEditEvent: 'sftp:edit-event',
+  forwardList: 'forward:list',
+  forwardStart: 'forward:start',
+  forwardStop: 'forward:stop',
+  forwardRemove: 'forward:remove',
+  forwardEvent: 'forward:event',
+  sessionSave: 'session:save',
+  sessionLoad: 'session:load',
+  sessionClear: 'session:clear'
 } as const
 
 /** 暴露给渲染进程的 API 契约，由 preload 实现 */
@@ -153,6 +267,12 @@ export interface SshClientApi {
     save(dto: SaveConnectionDTO): Promise<ConnectionVO>
     /** 删除连接 */
     remove(id: string): Promise<void>
+    /** 批量调整连接所属分组 */
+    assignGroup(dto: AssignGroupDTO): Promise<ConnectionVO[]>
+    /** 从 OpenSSH 配置或本应用导出的 JSON 导入连接；用户取消时返回 null */
+    importFromFile(): Promise<ImportResultVO | null>
+    /** 导出连接到 JSON 或 OpenSSH 配置；用户取消时返回 null */
+    exportToFile(): Promise<ExportResultVO | null>
   }
   /** 系统能力 */
   system: {
@@ -211,5 +331,31 @@ export interface SshClientApi {
     rename(sftpId: string, oldPath: string, newPath: string): Promise<void>
     /** 订阅文件传输进度，返回取消订阅函数 */
     onTransfer(listener: (vo: SftpTransferVO) => void): () => void
+    /** 用系统默认程序打开远程文件，保存后自动回传，返回编辑会话 */
+    edit(sftpId: string, remotePath: string): Promise<EditSessionVO>
+    /** 订阅编辑会话状态变化，返回取消订阅函数 */
+    onEditEvent(listener: (vo: EditSessionVO) => void): () => void
+  }
+  /** 端口转发（隧道） */
+  forward: {
+    /** 查询全部规则 */
+    list(): Promise<ForwardRuleVO[]>
+    /** 新增并启动一条规则 */
+    start(dto: ForwardRuleDTO): Promise<ForwardRuleVO>
+    /** 停止规则但保留配置 */
+    stop(id: string): Promise<void>
+    /** 删除规则 */
+    remove(id: string): Promise<void>
+    /** 订阅规则状态变化，返回取消订阅函数 */
+    onEvent(listener: (vo: ForwardRuleVO) => void): () => void
+  }
+  /** 会话恢复：只记录已保存连接的 id 与标签类型，不落盘任何凭据 */
+  session: {
+    /** 保存当前会话快照 */
+    save(snapshot: SessionSnapshotVO): Promise<void>
+    /** 读取上次快照，无快照时返回 null */
+    load(): Promise<SessionSnapshotVO | null>
+    /** 清除快照（用户选择忽略时调用） */
+    clear(): Promise<void>
   }
 }

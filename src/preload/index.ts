@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import { IPC, type SshClientApi, type SftpTransferVO } from '@shared/types'
+import {
+  IPC,
+  type SshClientApi,
+  type SftpTransferVO,
+  type EditSessionVO,
+  type ForwardRuleVO
+} from '@shared/types'
 
 /**
  * 渲染进程可用的业务 API。
@@ -10,7 +16,10 @@ const api: SshClientApi = {
   connections: {
     list: () => ipcRenderer.invoke(IPC.connList),
     save: (dto) => ipcRenderer.invoke(IPC.connSave, dto),
-    remove: (id) => ipcRenderer.invoke(IPC.connRemove, id)
+    remove: (id) => ipcRenderer.invoke(IPC.connRemove, id),
+    assignGroup: (dto) => ipcRenderer.invoke(IPC.connAssignGroup, dto),
+    importFromFile: () => ipcRenderer.invoke(IPC.connImport),
+    exportToFile: () => ipcRenderer.invoke(IPC.connExport)
   },
   system: {
     secureAvailable: () => ipcRenderer.invoke(IPC.secureAvailable),
@@ -55,7 +64,29 @@ const api: SshClientApi = {
       const handler = (_event: unknown, vo: SftpTransferVO): void => listener(vo)
       ipcRenderer.on(IPC.sftpTransfer, handler)
       return () => ipcRenderer.off(IPC.sftpTransfer, handler)
+    },
+    edit: (sftpId, remotePath) => ipcRenderer.invoke(IPC.sftpEdit, sftpId, remotePath),
+    onEditEvent: (listener) => {
+      const handler = (_event: unknown, vo: EditSessionVO): void => listener(vo)
+      ipcRenderer.on(IPC.sftpEditEvent, handler)
+      return () => ipcRenderer.off(IPC.sftpEditEvent, handler)
     }
+  },
+  forward: {
+    list: () => ipcRenderer.invoke(IPC.forwardList),
+    start: (dto) => ipcRenderer.invoke(IPC.forwardStart, dto),
+    stop: (id) => ipcRenderer.invoke(IPC.forwardStop, id),
+    remove: (id) => ipcRenderer.invoke(IPC.forwardRemove, id),
+    onEvent: (listener) => {
+      const handler = (_event: unknown, vo: ForwardRuleVO): void => listener(vo)
+      ipcRenderer.on(IPC.forwardEvent, handler)
+      return () => ipcRenderer.off(IPC.forwardEvent, handler)
+    }
+  },
+  session: {
+    save: (snapshot) => ipcRenderer.invoke(IPC.sessionSave, snapshot),
+    load: () => ipcRenderer.invoke(IPC.sessionLoad),
+    clear: () => ipcRenderer.invoke(IPC.sessionClear)
   }
 }
 
