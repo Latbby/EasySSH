@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon } from '@xterm/addon-search'
@@ -13,6 +13,26 @@ import {
   subscribeFontSize,
   writeFontSize
 } from '../terminalPrefs'
+import { subscribeTheme, type ResolvedTheme } from '../theme'
+
+/** 暗色终端配色：沿用原有取值，与界面暗色令牌保持同一套色板 */
+const DARK_TERMINAL_THEME: ITheme = {
+  // 终端底色略深于面板底色，形成"屏幕"层次
+  background: '#15181f',
+  foreground: '#e7eaf0',
+  cursor: '#6d9bff',
+  cursorAccent: '#15181f',
+  selectionBackground: 'rgba(109, 155, 255, 0.3)'
+}
+
+/** 亮色终端配色：白底深字，光标用亮色主题色，选中用同色低透明度蒙层 */
+const LIGHT_TERMINAL_THEME: ITheme = {
+  background: '#ffffff',
+  foreground: '#1f2430',
+  cursor: '#3b6fd4',
+  cursorAccent: '#ffffff',
+  selectionBackground: 'rgba(59, 111, 212, 0.22)'
+}
 
 interface Props {
   sessionId: string
@@ -42,6 +62,24 @@ function isAppShortcut(event: KeyboardEvent): boolean {
   if (event.ctrlKey && event.shiftKey && key === 'w') return true
   if (event.ctrlKey && !event.shiftKey && key === 'n') return true
   return false
+}
+
+/**
+ * 读取当前实际生效的主题。
+ * 主题由 theme.ts 统一写在 <html data-theme> 上，这里直接读属性，无需经组件 props 层层传递。
+ * @returns 当前主题；属性缺失（主题模块尚未执行）时按深色处理
+ */
+function readResolvedTheme(): ResolvedTheme {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
+}
+
+/**
+ * 取终端配色。
+ * @param theme 实际生效主题
+ * @returns 对应的 xterm 配色
+ */
+function terminalThemeFor(theme: ResolvedTheme): ITheme {
+  return theme === 'light' ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME
 }
 
 /**
@@ -231,14 +269,8 @@ function TerminalView({
       // 显式给出含中日韩等宽字体的字体栈，否则中文、制表符与表格会对不齐
       fontFamily:
         '"Cascadia Mono", "JetBrains Mono", Consolas, Menlo, "Microsoft YaHei Mono", "Noto Sans Mono CJK SC", monospace',
-      theme: {
-        // 与界面令牌保持同一套色板：终端底色略深于面板底色，形成"屏幕"层次
-        background: '#15181f',
-        foreground: '#e7eaf0',
-        cursor: '#6d9bff',
-        cursorAccent: '#15181f',
-        selectionBackground: 'rgba(109, 155, 255, 0.3)'
-      }
+      // 终端配色跟随当前主题：暗色沿用原色板，亮色用配套的白底方案
+      theme: terminalThemeFor(readResolvedTheme())
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -386,6 +418,18 @@ function TerminalView({
     })
     return unsubscribe
   }, [sessionId, applyFontSize])
+
+  // 主题切换（含跟随系统时系统偏好变化）时热更新终端配色：xterm 支持运行时替换 theme，
+  // 但换完需要整屏重绘一次，否则已经画上去的字符仍是旧配色
+  useEffect(() => {
+    const unsubscribe = subscribeTheme((theme) => {
+      const term = termRef.current
+      if (!term) return
+      term.options.theme = terminalThemeFor(theme)
+      term.refresh(0, term.rows - 1)
+    })
+    return unsubscribe
+  }, [])
 
   // 会话断开时补一行提示，便于区分主动退出与异常断开
   useEffect(() => {
