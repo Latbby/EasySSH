@@ -1,6 +1,6 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import { IPC, type SshClientApi } from '@shared/types'
+import { IPC, type SshClientApi, type SftpTransferVO } from '@shared/types'
 
 /**
  * 渲染进程可用的业务 API。
@@ -14,7 +14,13 @@ const api: SshClientApi = {
   },
   system: {
     secureAvailable: () => ipcRenderer.invoke(IPC.secureAvailable),
-    pickPrivateKey: () => ipcRenderer.invoke(IPC.pickPrivateKey)
+    pickPrivateKey: () => ipcRenderer.invoke(IPC.pickPrivateKey),
+    defaultUsername: () => ipcRenderer.invoke(IPC.defaultUsername),
+    readClipboard: () => ipcRenderer.invoke(IPC.clipboardRead),
+    writeClipboard: (text) => ipcRenderer.invoke(IPC.clipboardWrite, text),
+    trustHostKey: (host, port) => ipcRenderer.invoke(IPC.trustHostKey, host, port),
+    // 拖拽上传需要把浏览器 File 换成磁盘绝对路径，这个转换只在 preload 侧可用
+    pathForFile: (file) => webUtils.getPathForFile(file as File)
   },
   terminal: {
     open: (dto) => ipcRenderer.invoke(IPC.termOpen, dto),
@@ -39,11 +45,17 @@ const api: SshClientApi = {
     close: (sftpId) => ipcRenderer.send(IPC.sftpClose, sftpId),
     list: (sftpId, path) => ipcRenderer.invoke(IPC.sftpList, sftpId, path),
     upload: (sftpId, remoteDir) => ipcRenderer.invoke(IPC.sftpUpload, sftpId, remoteDir),
+    uploadPaths: (dto) => ipcRenderer.invoke(IPC.sftpUploadPaths, dto),
     download: (sftpId, remotePath) => ipcRenderer.invoke(IPC.sftpDownload, sftpId, remotePath),
     mkdir: (sftpId, path) => ipcRenderer.invoke(IPC.sftpMkdir, sftpId, path),
     remove: (sftpId, path) => ipcRenderer.invoke(IPC.sftpRemove, sftpId, path),
     rename: (sftpId, oldPath, newPath) =>
-      ipcRenderer.invoke(IPC.sftpRename, sftpId, oldPath, newPath)
+      ipcRenderer.invoke(IPC.sftpRename, sftpId, oldPath, newPath),
+    onTransfer: (listener) => {
+      const handler = (_event: unknown, vo: SftpTransferVO): void => listener(vo)
+      ipcRenderer.on(IPC.sftpTransfer, handler)
+      return () => ipcRenderer.off(IPC.sftpTransfer, handler)
+    }
   }
 }
 

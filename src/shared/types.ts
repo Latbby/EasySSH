@@ -80,6 +80,30 @@ export interface OpenSftpDTO {
   inline?: SaveConnectionDTO
 }
 
+/** 上传指定本地文件入参，供拖拽上传使用（不弹系统选择框） */
+export interface SftpUploadPathsDTO {
+  sftpId: string
+  /** 目标远程目录 */
+  remoteDir: string
+  /** 本地文件绝对路径列表 */
+  localPaths: string[]
+}
+
+/** 文件传输进度出参，主进程按块上报，供面板显示进度条 */
+export interface SftpTransferVO {
+  sftpId: string
+  /** 文件名，用于提示当前传输对象 */
+  name: string
+  /** 传输方向 */
+  direction: 'upload' | 'download'
+  /** 已传输字节数 */
+  transferred: number
+  /** 总字节数，服务端未提供大小时为 0 */
+  total: number
+  /** 该文件是否已完成 */
+  done: boolean
+}
+
 /** 打开 SFTP 会话出参 */
 export interface OpenSftpVO {
   /** SFTP 会话 id，后续文件操作都以此为路由键 */
@@ -97,6 +121,10 @@ export const IPC = {
   connRemove: 'conn:remove',
   secureAvailable: 'system:secure-available',
   pickPrivateKey: 'system:pick-private-key',
+  defaultUsername: 'system:default-username',
+  clipboardRead: 'system:clipboard-read',
+  clipboardWrite: 'system:clipboard-write',
+  trustHostKey: 'system:trust-host-key',
   termOpen: 'term:open',
   termWrite: 'term:write',
   termResize: 'term:resize',
@@ -107,10 +135,12 @@ export const IPC = {
   sftpClose: 'sftp:close',
   sftpList: 'sftp:list',
   sftpUpload: 'sftp:upload',
+  sftpUploadPaths: 'sftp:upload-paths',
   sftpDownload: 'sftp:download',
   sftpMkdir: 'sftp:mkdir',
   sftpRemove: 'sftp:remove',
-  sftpRename: 'sftp:rename'
+  sftpRename: 'sftp:rename',
+  sftpTransfer: 'sftp:transfer'
 } as const
 
 /** 暴露给渲染进程的 API 契约，由 preload 实现 */
@@ -130,6 +160,19 @@ export interface SshClientApi {
     secureAvailable(): Promise<boolean>
     /** 弹出文件选择框挑选私钥，取消时返回 null */
     pickPrivateKey(): Promise<string | null>
+    /** 当前系统登录用户名，作为快速连接的默认用户名 */
+    defaultUsername(): Promise<string>
+    /** 读取系统剪贴板文本，终端粘贴用 */
+    readClipboard(): Promise<string>
+    /** 写入系统剪贴板，终端复制用 */
+    writeClipboard(text: string): Promise<void>
+    /** 用户核对后确认信任变更后的主机密钥，写入本机 known_hosts */
+    trustHostKey(host: string, port: number): Promise<void>
+    /**
+     * 取拖拽进来的本地文件的绝对路径。
+     * 入参是浏览器的 File 对象，这里用 unknown 声明以免 node 侧 tsconfig 依赖 DOM 类型。
+     */
+    pathForFile(file: unknown): string
   }
   /** 终端会话 */
   terminal: {
@@ -156,6 +199,8 @@ export interface SshClientApi {
     list(sftpId: string, path: string): Promise<SftpEntryVO[]>
     /** 弹出文件选择框上传到指定远程目录，返回上传成功的文件名；用户取消时为空数组 */
     upload(sftpId: string, remoteDir: string): Promise<string[]>
+    /** 上传指定的本地文件（拖拽上传），返回上传成功的文件名 */
+    uploadPaths(dto: SftpUploadPathsDTO): Promise<string[]>
     /** 弹出保存框下载远程文件，返回是否完成 */
     download(sftpId: string, remotePath: string): Promise<boolean>
     /** 新建远程目录 */
@@ -164,5 +209,7 @@ export interface SshClientApi {
     remove(sftpId: string, path: string): Promise<void>
     /** 重命名或移动远程路径 */
     rename(sftpId: string, oldPath: string, newPath: string): Promise<void>
+    /** 订阅文件传输进度，返回取消订阅函数 */
+    onTransfer(listener: (vo: SftpTransferVO) => void): () => void
   }
 }
