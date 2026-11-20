@@ -7,16 +7,22 @@ import icon from '../../resources/icon.png?asset'
 import { registerIpcHandlers, type IpcHandle } from './ipc'
 
 /**
- * 关于沙箱与受管控环境的说明。
+ * 关于强制完整性标签与"双击没反应"的说明。
  *
- * 部分受管控的 Windows 环境（企业安全软件、VPN 客户端驻留的内核驱动与进程保护服务）
- * 会拦截 Chromium 的沙箱初始化，进程会在创建窗口之前静默退出：表现为双击毫无反应，
- * 且事件日志、崩溃转储、应用自身日志里都查不到任何记录，极难排查。
+ * Windows 按文件标签继承强制完整性级别。若打包目录带 `Low Mandatory Level` 标签
+ * （例如在被 Windows 沙箱打标过的工作区里构建——沙箱以受限令牌 + Low 完整性派生进程，
+ * 它在工作区里新建的文件会继承这个可继承的 Low 标签），ssh-client.exe 也会带上该标签：
+ * 此时即使只是普通双击，Windows 也会把进程降到 Low 完整性级别。Low IL 进程无法为 Chromium
+ * 的沙箱子进程在 %TEMP%、%APPDATA% 这类 Medium 目录上配置 ACL，浏览器进程会在本文件执行
+ * 之前以 0x80000003(STATUS_BREAKPOINT) 退出，表现为双击毫无反应，且没有窗口、没有日志、
+ * 没有崩溃转储。
  *
- * 注意：`app.commandLine.appendSwitch('no-sandbox')` 实测**无效** —— 该开关作用于 main.js
- * 执行之前的沙箱初始化阶段，只能通过真实命令行参数传入。因此受管控环境下必须用同目录的
- * start.bat（或 start.lnk，二者都带 --no-sandbox）启动，直接双击 exe 无法运行。
- * 实测 --no-sandbox 是唯一必需的参数，GPU 相关开关无效且不必添加。
+ * 修复：打包结束后把整棵产物的标签重置为 Medium，已由 electron-builder 的 afterPack 钩子
+ * (scripts/after-pack.cjs) 自动完成，重置失败会让构建直接报错。
+ *
+ * 注意：`app.commandLine.appendSwitch('no-sandbox')` 实测**无效** —— 该开关作用于本文件
+ * 执行之前的沙箱初始化阶段，只能通过真实命令行参数传入。start.bat / start.lnk 因此保留
+ * --no-sandbox 作为兜底启动方式，但标签正常时直接双击 exe 即可运行。
  */
 
 // 允许通过环境变量覆盖数据目录，便于自动化测试与便携部署，必须在 app ready 之前设置

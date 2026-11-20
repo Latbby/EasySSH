@@ -108,27 +108,44 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
 本机开发环境若设置了 `ELECTRON_RUN_AS_NODE=1`，`electron.exe` 会退化成纯 Node 运行、
 无法启动图形界面，需要在该变量未设置的环境下启动应用或运行 `verify:e2e`。
 
-## 运行环境要求（重要）
+## 双击没反应？先看强制完整性标签（重要）
 
-打包产物是**未签名**的 Electron 应用。在受企业安全策略管控的机器上（例如安装了深信服
-SSL VPN 客户端、启用了要求"微软签名级别"的代码完整性策略），未签名程序可能被**静默阻止**：
-双击没有任何反应，且事件日志与崩溃转储里都查不到记录，极难排查。
+产物是**未签名**的 Electron 应用，但未签名本身并不会阻止它启动（本机实测：Smart App Control
+关闭、无 WDAC/AppLocker 策略、CodeIntegrity 无任何阻断事件，未签名程序照常运行）。
+
+真正会让"双击毫无反应"的是产物的**强制完整性标签**（Mandatory Integrity Label）。Windows 的
+完整性级别按文件标签继承：若打包发生在带 `Low Mandatory Level` 标签的目录下（例如被 Windows
+沙箱打标过的目录 —— 沙箱以受限令牌 + Low 完整性派生进程，它在工作区里新建的文件会继承这个可
+继承的 Low 标签），产物中的 `ssh-client.exe` 也会带上该标签。此后即使只是普通双击，Windows 也会
+把进程降到 Low 完整性级别；而 Low IL 进程无法为 Chromium 的沙箱子进程在 `%TEMP%`、`%APPDATA%`
+这类 Medium 目录上配置 ACL（Chromium 日志原文：`Failed to create network context data directory
+… 拒绝访问。 (0x5)`），浏览器进程会在主进程 JS 执行之前以 `0x80000003`
+（STATUS_BREAKPOINT）退出。
+
+表现特征：**没有窗口、没有日志、没有崩溃转储**，`%TEMP%` 与 exe 目录下都找不到
+`ssh-client-startup.log`，事件日志里也没有 Application Error —— 与"被安全软件静默拦截"极像，
+但原因完全不同。
 
 判断方法：
 
-- 同一台机器上**已签名**的 Electron 应用（语雀、VS Code 等）能正常运行，而本应用双击无反应；
-- `%LOCALAPPDATA%\CrashDumps` 里没有对应的 `.dmp`，事件日志"应用程序"里也没有 Application Error；
-- `Get-AuthenticodeSignature` 显示本应用为 `NotSigned`，而能运行的应用为 `Valid`。
+- `icacls dist\win-unpacked\ssh-client.exe` 输出中出现 `Mandatory Label\Low Mandatory Level`；
+- 把产物整个目录复制到桌面等普通目录后双击可以正常打开（复制件不再继承该标签）；
+- 带 `--no-sandbox` 启动也能打开 —— 因为不再需要为沙箱子进程配置 ACL。
 
-解决方式（任选其一）：
+解决方式：
 
-1. 在不受管控的机器上运行；
-2. 为应用申请代码签名证书后再分发（electron-builder 配置 `win.certificateFile` 等签名参数）；
-3. 请 IT 将该程序加入白名单。
+1. **构建侧已自动处理**：electron-builder 的 `afterPack` 钩子（`scripts/after-pack.cjs`）在打包
+   目录组装完成后把整棵产物的完整性标签重置为 Medium，并在重置失败时直接让构建失败，避免把
+   "双击没反应"的产物发出去；
+2. 手工补救：`icacls <产物目录> /setintegritylevel Medium /T /C`；
+3. 或者把产物复制 / 解压到普通目录（桌面、`C:\Program Files` 等）再运行。
+
+`--no-sandbox` 同样能启动，但它会关闭渲染进程沙箱，只建议作为排障手段，不要作为常规启动方式。
 
 可用的排查工具（随包分发在应用目录下）：
 
 - `run-debug.bat`：双击即可看到启动日志与退出码；
-- `run-compat.bat`：带 `--no-sandbox --disable-gpu` 启动，用于排除显卡与沙箱因素。
+- `start.bat` / `start.lnk`：带 `--no-sandbox` 的兜底启动器，仅在标签无法重置时使用。
 
-主进程会把启动全过程写入 `%TEMP%\ssh-client-startup.log`，包括未捕获异常与渲染进程加载失败。
+主进程会把启动全过程写入日志，包括未捕获异常与渲染进程加载失败。日志按以下顺序挑选第一个可写
+位置：`%TEMP%\ssh-client-startup.log` → `<userData>\startup.log` → exe 所在目录。

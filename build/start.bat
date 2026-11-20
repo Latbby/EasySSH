@@ -1,19 +1,24 @@
 @echo off
 rem ============================================================
-rem  SSH Client - launcher (USE THIS ONE)
+rem  SSH Client - fallback launcher
 rem
-rem  Do NOT double-click ssh-client.exe directly.
+rem  You normally do NOT need this file. Double-click
+rem  ssh-client.exe directly: electron-builder resets the
+rem  packaged files' mandatory integrity label to Medium via the
+rem  afterPack hook (scripts/after-pack.cjs), so the Chromium
+rem  sandbox initializes normally.
 rem
-rem  Why: on managed Windows machines (enterprise security agents,
-rem  VPN kernel drivers and their process-protection services),
-rem  Chromium's sandbox initialization is blocked. The process then
-rem  exits silently BEFORE any window is created, leaving no log and
-rem  no crash dump - it just looks like "double-click does nothing".
+rem  Use this launcher only when that reset did not happen and
+rem  icacls reports "Low Mandatory Level" on ssh-client.exe.
+rem  A Low label forces the process to Low integrity, Chromium
+rem  then cannot provision sandbox ACLs on Medium directories
+rem  (%TEMP%, %APPDATA%) and the browser process exits with
+rem  0x80000003 before any window or log appears - a silent
+rem  no-op on double-click.
 rem
-rem  --no-sandbox is the only flag that is actually required; the
-rem  GPU related switches were tested and made no difference.
-rem  This app only loads local pages and never browses external
-rem  sites, so the trade-off is acceptable.
+rem  --no-sandbox skips that ACL provisioning, at the cost of
+rem  the renderer sandbox. Prefer fixing the label instead:
+rem    icacls "<app dir>" /setintegritylevel Medium /T /C
 rem ============================================================
 
 cd /d "%~dp0"
