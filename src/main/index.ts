@@ -1,10 +1,11 @@
-import { app, shell, BrowserWindow, Menu } from 'electron'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync } from 'fs'
+import { app, shell, BrowserWindow, Menu, safeStorage } from 'electron'
+import { appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { registerIpcHandlers, type IpcHandle } from './ipc'
+import { migrateLegacyUserData, repairLegacyCredentialKey } from './migrate'
 
 /**
  * 关于强制完整性标签与"双击没反应"的说明。
@@ -32,40 +33,6 @@ if (process.env.EASYSSH_USER_DATA) {
 
 /** 选定并缓存的日志文件路径 */
 let logFile: string | undefined
-
-/**
- * 更名后的数据目录迁移。
- * 应用名从 ssh-client 改成 EasySSH 后，Electron 的 userData 目录随之改变；
- * 这里在首次启动新版本时把旧目录里的连接、已知主机、分组与会话快照复制过来，
- * 否则老用户升级后会看到"连接全没了"。只在目标文件不存在时复制，不覆盖新数据。
- */
-function migrateLegacyUserData(): void {
-  try {
-    // 数据目录被环境变量显式指定时（自动化测试 / 便携部署）不做迁移
-    if (process.env.EASYSSH_USER_DATA) return
-    const current = app.getPath('userData')
-    const legacy = join(app.getPath('appData'), 'ssh-client')
-    if (current === legacy || !existsSync(legacy)) return
-    mkdirSync(current, { recursive: true })
-    const migrated: string[] = []
-    for (const name of ['connections.json', 'known_hosts.json', 'groups.json', 'session.json']) {
-      const from = join(legacy, name)
-      const to = join(current, name)
-      if (existsSync(from) && !existsSync(to)) {
-        copyFileSync(from, to)
-        migrated.push(name)
-      }
-    }
-    if (migrated.length > 0) {
-      log(
-        `已从旧数据目录迁移 ${migrated.length} 个文件（${migrated.join('、')}）：${legacy} → ${current}`
-      )
-    }
-  } catch (error) {
-    // 迁移失败不能影响启动，用户仍可手动复制旧目录里的文件
-    log(`[旧数据迁移失败] ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
 
 /**
  * 依次尝试可写的日志位置并缓存第一个成功的。
@@ -114,8 +81,16 @@ log(
   `兼容模式=${process.env.EASYSSH_NO_COMPAT === '1' ? '已关闭' : '开启'} 日志=${resolveLogFile()}`
 )
 
-// 应用更名（ssh-client → EasySSH）会把 userData 目录换掉，首次启动时迁移旧数据
-migrateLegacyUserData()
+// 应用更名（ssh-client → EasySSH）会把 userData 目录换掉，首次启动时迁移旧数据。
+// 数据目录被环境变量显式指定时（自动化测试 / 便携部署）跳过：那种场景下"当前目录"是临时的，
+// 把真实用户数据搬进去会污染测试环境。
+if (!process.env.EASYSSH_USER_DATA) {
+  const migrated = migrateLegacyUserData({
+    appData: app.getPath('appData'),
+    userData: app.getPath('userData')
+  })
+  log(`数据目录迁移：${migrated.join('、') || '(无需迁移)'}`)
+}
 
 // 未捕获异常必须落盘，否则用户只会看到窗口一闪而过或完全没有反应
 process.on('uncaughtException', (error) => {
@@ -195,6 +170,21 @@ function createWindow(): void {
 app.whenReady().then(() => {
   log('app ready')
 
+  /**
+   * 判断一段密文能否用当前主密钥解开，供凭据自检使用。
+   * @param secret base64 密文
+   * @returns 可解密返回 true
+   */
+  const canDecryptSecret = (secret: string): boolean => {
+    try {
+      // 系统不支持加密时不做判断，避免把"环境不支持"误判成"密钥不对"
+      if (!safeStorage.isEncryptionAvailable()) return true
+      return safeStorage.decryptString(Buffer.from(secret, 'base64')).length > 0
+    } catch {
+      return false
+    }
+  }
+
   // 去掉 Electron 的默认菜单：它自带的 View→Zoom 加速键会把 Ctrl+= / Ctrl+- / Ctrl+滚轮
   // 抢去缩放整个页面（界面发虚、终端字号反而不变），而本应用要的是「只缩放终端字号」。
   // 去掉菜单后这些按键完整交给渲染进程；输入框的复制粘贴由 Chromium 原生处理，不受影响。
@@ -202,6 +192,21 @@ app.whenReady().then(() => {
 
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
+
+  // 窗口创建前自检一次凭据主密钥：密文解不开时恢复旧密钥并重启，避免用户看到「密码不回显」。
+  // 与迁移同理，数据目录被环境变量指定时不做（否则会把真实主密钥写进测试用的临时目录）。
+  if (
+    !process.env.EASYSSH_USER_DATA &&
+    repairLegacyCredentialKey(
+      { appData: app.getPath('appData'), userData: app.getPath('userData') },
+      canDecryptSecret
+    ) === 'repaired'
+  ) {
+    log('[凭据密钥修复] 旧版密码密文无法用当前主密钥解密，已恢复旧数据目录的主密钥并重启应用')
+    app.relaunch()
+    app.exit(0)
+    return
+  }
 
   // Default open or close DevTools by F12 in development
   // and ignore CommandOrControl + R in production.
