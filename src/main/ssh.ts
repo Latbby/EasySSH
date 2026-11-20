@@ -5,6 +5,8 @@ import { createHash, randomUUID } from 'crypto'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import type { OpenTerminalVO } from '@shared/types'
+import { encodeHostKeyChanged, type HostKeyChangeVO } from '@shared/errors'
+import { toReadableError } from './errors'
 
 /** 解析完成的 SSH 连接参数，认证凭据已在主进程内解密 */
 export interface ResolvedSshConfig {
@@ -40,6 +42,12 @@ export const POOL_CLOSED = 'closed'
 /** 已知主机指纹表，key 为 host:port，全部连接共用一份 */
 let knownHosts: Record<string, string> | null = null
 
+/**
+ * 待用户确认的主机密钥变更，key 为 host:port。
+ * 指纹变化时本次握手仍然拒绝，由渲染进程弹框让用户核对，确认后再由 {@link trustPendingHostKey} 落盘。
+ */
+const pendingHostKeys = new Map<string, HostKeyChangeVO>()
+
 /** 已知主机指纹表文件路径 */
 function knownHostsFile(): string {
   return join(app.getPath('userData'), 'known_hosts.json')
@@ -47,16 +55,34 @@ function knownHostsFile(): string {
 
 /**
  * 读取已知主机指纹表，进程内缓存。
+ * 文件损坏时先改名为 .bak 保留现场再重建空表：若静默按空表处理，下次连接会直接重新 TOFU，
+ * 主机身份校验会无声失效，用户与日志都看不到任何痕迹。
  * @returns host:port 到 SHA256 指纹的映射
  */
 function loadKnownHosts(): Record<string, string> {
   if (knownHosts) return knownHosts
   const file = knownHostsFile()
-  let table: Record<string, string>
-  try {
-    table = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
-  } catch {
-    table = {}
+  let table: Record<string, string> = {}
+  if (existsSync(file)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('known_hosts 内容不是对象')
+      }
+      table = parsed as Record<string, string>
+    } catch {
+      // 解析失败说明记录表已损坏：备份现场后重建空表，并留下日志，避免主机身份校验无声失效
+      try {
+        renameSync(file, `${file}.bak`)
+        console.warn(
+          `[ssh-client] known_hosts 无法解析，已备份为 ${file}.bak 并重建空表，本次连接将重新记录主机指纹`
+        )
+      } catch {
+        console.warn(
+          `[ssh-client] known_hosts 无法解析且备份失败（${file}），本次连接将重新记录主机指纹`
+        )
+      }
+    }
   }
   knownHosts = table
   return table
@@ -84,11 +110,52 @@ function verifyHostKey(host: string, port: number, key: Buffer): boolean {
   const table = loadKnownHosts()
   const known = table[target]
   if (!known) {
+    // 首次连接采用 TOFU 策略：记录指纹并直接信任，不额外增加首次确认弹窗
     table[target] = fingerprint
     saveKnownHosts()
     return true
   }
-  return known === fingerprint
+  if (known === fingerprint) {
+    // 指纹一致，清掉可能残留的待确认记录
+    pendingHostKeys.delete(target)
+    return true
+  }
+  // 指纹变化：记入待确认表并拒绝本次握手，既不静默信任新密钥，也不把用户堵死在无法恢复的错误上
+  pendingHostKeys.set(target, { host, port, oldFingerprint: known, newFingerprint: fingerprint })
+  return false
+}
+
+/**
+ * 用户核对后信任待确认的主机新指纹，写入 known_hosts 并原子落盘。
+ * 没有待确认记录时不做任何事，重复调用是安全的。
+ * @param host 目标主机
+ * @param port 目标端口
+ */
+export function trustPendingHostKey(host: string, port: number): void {
+  const target = `${host}:${port}`
+  const pending = pendingHostKeys.get(target)
+  if (!pending) return
+  const table = loadKnownHosts()
+  table[target] = pending.newFingerprint
+  saveKnownHosts()
+  // 落盘成功后才清除待确认记录，避免写盘失败时用户重连又被拒绝
+  pendingHostKeys.delete(target)
+}
+
+/**
+ * 判断一次握手失败是否确实来自主机密钥校验。
+ * ssh2 在 hostVerifier 返回 false 时抛出 'Host denied (verification failed)' 且 level 为 'handshake'，
+ * 这里同时看 level 与关键字：只有两者相符才认定为密钥变更，
+ * 否则 ECONNREFUSED、网络不可达等无关失败会被误报成「疑似中间人攻击」。
+ * @param err 握手阶段抛出的错误
+ * @returns 是否为主机密钥校验失败
+ */
+function isHostKeyRejected(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const level = (err as { level?: string }).level
+  if (!/host denied|verification failed|host key/i.test(err.message)) return false
+  // 少数版本可能不带 level，只要信息明确指向主机密钥即可认定
+  return level === undefined || level === 'handshake'
 }
 
 /**
@@ -123,7 +190,13 @@ export class SshConnectionPool extends EventEmitter {
         } catch {
           // 尚未建立连接时 end 可能抛错，忽略即可
         }
-        reject(err)
+        // 只有确实因主机密钥校验失败时才抛编码错误，避免服务端下线等失败被误报成密钥变更
+        const pending = pendingHostKeys.get(`${config.host}:${config.port}`)
+        reject(
+          pending && isHostKeyRejected(err)
+            ? new Error(encodeHostKeyChanged(pending))
+            : toReadableError(err, `连接 ${config.host}:${config.port}`)
+        )
       })
       client.connect({
         host: config.host,
@@ -181,6 +254,12 @@ export class SshSessionManager {
   /** sessionId 到终端会话 */
   private sessions = new Map<string, Session>()
 
+  /** 待冲刷的远端输出，key 为会话 id，value 为已到达但尚未合并上报的分片 */
+  private pendingOutput = new Map<string, Buffer[]>()
+
+  /** 批量冲刷任务，同一事件循环内只安排一次 */
+  private flushTask: ReturnType<typeof setImmediate> | null = null
+
   /**
    * @param pool 共享的连接池
    * @param onData 远端输出回调，data 为原始字节，交由渲染进程的 xterm 完成 UTF-8 解码
@@ -220,16 +299,60 @@ export class SshSessionManager {
     } catch (err) {
       // 开 shell 失败要把引用计数还回去，否则底层连接永远不会释放
       this.pool.release(config.connectionId)
-      throw err
+      throw toReadableError(err, '打开终端')
     }
 
     this.sessions.set(sessionId, { id: sessionId, connectionId: config.connectionId, stream })
-    // 直接透传原始字节，由 xterm 的 UTF-8 解码器处理跨数据包的多字节字符，避免中文乱码
-    stream.on('data', (chunk: Buffer) => this.onData(sessionId, new Uint8Array(chunk)))
-    stream.stderr.on('data', (chunk: Buffer) => this.onData(sessionId, new Uint8Array(chunk)))
+    // 原始字节先按到达顺序暂存，由 setImmediate 批量合并后上报，跨数据包的多字节字符仍交给 xterm 解码
+    stream.on('data', (chunk: Buffer) => this.queueOutput(sessionId, chunk))
+    stream.stderr.on('data', (chunk: Buffer) => this.queueOutput(sessionId, chunk))
     stream.on('close', () => this.close(sessionId, '会话已关闭'))
 
     return { sessionId, title: config.title }
+  }
+
+  /**
+   * 暂存一个输出分片，并为整个事件循环安排一次冲刷。
+   * 高吞吐输出（如 cat 大文件）下 ssh2 会拆出大量小分片，逐个走 IPC 既慢又容易拖住渲染进程。
+   * @param sessionId 会话 id
+   * @param chunk 远端输出的原始字节
+   */
+  private queueOutput(sessionId: string, chunk: Buffer): void {
+    const chunks = this.pendingOutput.get(sessionId)
+    if (chunks) chunks.push(chunk)
+    else this.pendingOutput.set(sessionId, [chunk])
+    // setImmediate 在本轮 I/O 回调全部执行完之后触发，能攒下同一批到达的全部分片
+    if (!this.flushTask) this.flushTask = setImmediate(() => this.flushOutput())
+  }
+
+  /** 冲刷全部会话的待发送输出，按到达顺序合并后各上报一次 */
+  private flushOutput(): void {
+    this.flushTask = null
+    // 先整体取出再回调：回调期间新到达的数据会进入下一轮批量，既不丢数据也不会乱序
+    const batches = [...this.pendingOutput]
+    this.pendingOutput.clear()
+    for (const [sessionId, chunks] of batches) this.emitOutput(sessionId, chunks)
+  }
+
+  /**
+   * 立即冲刷指定会话的待发送输出，用于关闭会话前补齐最后一段数据。
+   * @param sessionId 会话 id
+   */
+  private flushSession(sessionId: string): void {
+    const chunks = this.pendingOutput.get(sessionId)
+    if (!chunks) return
+    this.pendingOutput.delete(sessionId)
+    this.emitOutput(sessionId, chunks)
+  }
+
+  /**
+   * 合并分片并交给 onData 上报。
+   * @param sessionId 会话 id
+   * @param chunks 已按到达顺序排列的输出分片
+   */
+  private emitOutput(sessionId: string, chunks: Buffer[]): void {
+    const merged = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks)
+    this.onData(sessionId, new Uint8Array(merged))
   }
 
   /**
@@ -247,6 +370,8 @@ export class SshSessionManager {
     } catch {
       // 流可能已由远端关闭，忽略
     }
+    // 先补齐尚未冲刷的输出再通知退出，保证用户能看到最后一段内容
+    this.flushSession(sessionId)
     this.pool.release(session.connectionId)
     this.onExit(sessionId, reason)
   }

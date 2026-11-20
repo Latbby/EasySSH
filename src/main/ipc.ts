@@ -1,5 +1,6 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron'
+import { BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
 import { readFileSync } from 'fs'
+import { userInfo } from 'os'
 import {
   IPC,
   type ConnectionVO,
@@ -8,7 +9,9 @@ import {
   type OpenTerminalDTO,
   type OpenTerminalVO,
   type SaveConnectionDTO,
-  type SftpEntryVO
+  type SftpEntryVO,
+  type SftpTransferVO,
+  type SftpUploadPathsDTO
 } from '@shared/types'
 import {
   getConnection,
@@ -18,7 +21,12 @@ import {
   resolveCredential,
   saveConnection
 } from './store'
-import { SshConnectionPool, SshSessionManager, type ResolvedSshConfig } from './ssh'
+import {
+  SshConnectionPool,
+  SshSessionManager,
+  trustPendingHostKey,
+  type ResolvedSshConfig
+} from './ssh'
 import { SftpManager } from './sftp'
 
 /** 打开终端或 SFTP 的公共入参：已保存连接与临时连接二选一 */
@@ -103,7 +111,8 @@ export function registerIpcHandlers(): IpcHandle {
     (sessionId, data) => broadcast(IPC.termData, sessionId, data),
     (sessionId, reason) => broadcast(IPC.termExit, sessionId, reason)
   )
-  const sftp = new SftpManager(pool)
+  // 上传与下载的进度经 IPC.sftpTransfer 广播，渲染进程据此画进度条
+  const sftp = new SftpManager(pool, (vo: SftpTransferVO) => broadcast(IPC.sftpTransfer, vo))
 
   ipcMain.handle(IPC.connList, (): ConnectionVO[] => listConnections())
   ipcMain.handle(IPC.connSave, (_event, dto: SaveConnectionDTO): ConnectionVO =>
@@ -123,6 +132,14 @@ export function registerIpcHandlers(): IpcHandle {
     })
     return result.canceled ? null : result.filePaths[0]
   })
+  ipcMain.handle(IPC.clipboardRead, (): string => clipboard.readText())
+  ipcMain.handle(IPC.clipboardWrite, (_event, text: string): void => clipboard.writeText(text))
+  // 快速连接需要默认用户名，取当前系统登录用户
+  ipcMain.handle(IPC.defaultUsername, (): string => userInfo().username)
+  // 用户在主机密钥变更弹窗里确认后，把新指纹写入 known_hosts
+  ipcMain.handle(IPC.trustHostKey, (_event, host: string, port: number): void =>
+    trustPendingHostKey(host, port)
+  )
 
   ipcMain.handle(IPC.termOpen, (_event, dto: OpenTerminalDTO): Promise<OpenTerminalVO> =>
     terminal.open(resolveConfig(dto), dto.cols, dto.rows)
@@ -143,6 +160,9 @@ export function registerIpcHandlers(): IpcHandle {
   )
   ipcMain.handle(IPC.sftpUpload, (_event, sftpId: string, remoteDir: string): Promise<string[]> =>
     sftp.upload(sftpId, remoteDir)
+  )
+  ipcMain.handle(IPC.sftpUploadPaths, (_event, dto: SftpUploadPathsDTO): Promise<string[]> =>
+    sftp.uploadPaths(dto)
   )
   ipcMain.handle(IPC.sftpDownload, (_event, sftpId: string, remotePath: string): Promise<boolean> =>
     sftp.download(sftpId, remotePath)
