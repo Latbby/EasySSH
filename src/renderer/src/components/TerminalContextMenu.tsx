@@ -50,6 +50,8 @@ function TerminalContextMenu({
       x: Math.max(4, Math.min(x, window.innerWidth - width - 4)),
       y: Math.max(4, Math.min(y, window.innerHeight - height - 4))
     })
+    // 菜单是弹层：把焦点收回菜单内，Esc 与屏幕阅读器才能正常工作
+    menu.focus()
   }, [x, y])
 
   // 点击外部、Esc、滚动都关闭菜单；scroll 不冒泡，需要捕获阶段监听才能收到容器内滚动
@@ -87,24 +89,30 @@ function TerminalContextMenu({
   }
 
   return (
-    <div className="ctx-menu" ref={menuRef} style={{ left: pos.x, top: pos.y }}>
-      <button className="ctx-menu-item" disabled={!canCopy} onClick={pick(onCopy)}>
+    <div
+      className="ctx-menu"
+      ref={menuRef}
+      role="menu"
+      tabIndex={-1}
+      style={{ left: pos.x, top: pos.y }}
+    >
+      <button className="ctx-menu-item" role="menuitem" disabled={!canCopy} onClick={pick(onCopy)}>
         复制
         <span className="ctx-menu-shortcut">Ctrl+Shift+C</span>
       </button>
-      <button className="ctx-menu-item" onClick={pick(onPaste)}>
+      <button className="ctx-menu-item" role="menuitem" onClick={pick(onPaste)}>
         粘贴
         <span className="ctx-menu-shortcut">Ctrl+Shift+V</span>
       </button>
       <div className="ctx-menu-sep" />
-      <button className="ctx-menu-item" onClick={pick(onSelectAll)}>
+      <button className="ctx-menu-item" role="menuitem" onClick={pick(onSelectAll)}>
         全选
       </button>
-      <button className="ctx-menu-item" onClick={pick(onFind)}>
+      <button className="ctx-menu-item" role="menuitem" onClick={pick(onFind)}>
         查找
         <span className="ctx-menu-shortcut">Ctrl+F</span>
       </button>
-      <button className="ctx-menu-item" onClick={pick(onClear)}>
+      <button className="ctx-menu-item" role="menuitem" onClick={pick(onClear)}>
         清屏
       </button>
     </div>

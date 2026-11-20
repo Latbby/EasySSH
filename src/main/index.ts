@@ -94,12 +94,15 @@ let ipcHandle: IpcHandle | undefined
 function createWindow(): void {
   log('开始创建窗口')
   const mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 760,
-    minWidth: 720,
-    minHeight: 480,
+    width: 1280,
+    height: 820,
+    minWidth: 780,
+    minHeight: 520,
     show: false,
     autoHideMenuBar: true,
+    // 与界面底色一致，避免窗口出现到首帧渲染之间闪一下白底
+    backgroundColor: '#0e1015',
+    title: 'SSH 客户端',
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

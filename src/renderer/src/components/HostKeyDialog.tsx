@@ -1,4 +1,6 @@
+import { useRef } from 'react'
 import type { HostKeyChangeVO } from '@shared/errors'
+import { useFocusTrap } from '../useFocusTrap'
 
 interface Props {
   /** 主机密钥变更详情，含新旧指纹 */
@@ -19,30 +21,49 @@ interface Props {
  * @returns 弹窗元素
  */
 function HostKeyDialog({ change, busy, onTrust, onCancel }: Props): React.JSX.Element {
+  /** 弹窗容器：Esc 关闭与 Tab 循环交给焦点陷阱 */
+  const dialogRef = useRef<HTMLDivElement>(null)
+
+  useFocusTrap(dialogRef, onCancel)
+
   return (
     <div className="modal-mask" onClick={onCancel}>
-      <div className="modal modal-wide" onClick={(event) => event.stopPropagation()}>
-        <h2 className="modal-title">主机密钥已变更</h2>
+      <div
+        className="modal modal-wide"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="host-key-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-head">
+          <h2 className="modal-title" id="host-key-title">
+            主机密钥已变更
+          </h2>
+        </div>
 
-        <p className="modal-note">
-          {change.host}:{change.port} 本次返回的主机密钥与本机记录不一致。
-          服务器重装、更换密钥都会这样，但也可能是中间人攻击。请先与服务器管理员核对下面
-          的新指纹，确认无误后再继续。
-        </p>
+        <div className="modal-body">
+          <p className="modal-note">
+            {change.host}:{change.port} 本次返回的主机密钥与本机记录不一致。
+            服务器重装、更换密钥都会这样，但也可能是中间人攻击。请先与服务器管理员核对下面
+            的新指纹，确认无误后再继续。
+          </p>
 
-        <div className="fp-table">
-          <div className="fp-row">
-            <span className="fp-label">本机已记录的指纹</span>
-            <span className="fp-value old">{change.oldFingerprint}</span>
-          </div>
-          <div className="fp-row">
-            <span className="fp-label">本次连接收到的指纹</span>
-            <span className="fp-value new">{change.newFingerprint}</span>
+          <div className="fp-table">
+            <div className="fp-row">
+              <span className="fp-label">本机已记录的指纹</span>
+              <span className="fp-value old">{change.oldFingerprint}</span>
+            </div>
+            <div className="fp-row">
+              <span className="fp-label">本次连接收到的指纹</span>
+              <span className="fp-value new">{change.newFingerprint}</span>
+            </div>
           </div>
         </div>
 
-        <div className="modal-actions">
-          <button type="button" onClick={onCancel}>
+        <div className="modal-foot">
+          {/* 默认聚焦「取消连接」：安全敏感的弹窗不应让回车直接触发信任 */}
+          <button type="button" onClick={onCancel} autoFocus>
             取消连接
           </button>
           <button type="button" className="primary-btn" onClick={onTrust} disabled={busy}>

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useRef, useState } from 'react'
 import type { AuthType, ConnectionVO, SaveConnectionDTO } from '@shared/types'
 import { toMessage } from '../utils'
+import { useFocusTrap } from '../useFocusTrap'
 
 interface Props {
   /** 编辑时传入已有连接，新增时为空 */
@@ -36,15 +37,10 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
   const [clearCredential, setClearCredential] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  /** 弹窗容器：Esc 关闭、Tab 循环与关闭后归还焦点都由焦点陷阱统一处理 */
+  const modalRef = useRef<HTMLFormElement>(null)
 
-  // Esc 关闭表单：监听挂在 window 上，焦点不在表单内时也能关闭
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onCancel()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onCancel])
+  useFocusTrap(modalRef, onCancel)
 
   /** 弹出系统文件选择框挑选私钥文件 */
   const pickPrivateKey = async (): Promise<void> => {
@@ -99,115 +95,129 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
   return (
     <div className="modal-mask" onClick={onCancel}>
       {/* 表单内文本框回车会走浏览器隐式提交，等价于点「保存」 */}
-      <form className="modal" onClick={(event) => event.stopPropagation()} onSubmit={handleSubmit}>
-        <h2 className="modal-title">{isCreate ? '新建连接' : '编辑连接'}</h2>
-
-        <label className="field">
-          <span>名称</span>
-          <input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="留空则使用 用户名@主机"
-          />
-        </label>
-
-        <div className="field-row">
-          <label className="field grow">
-            <span>主机</span>
-            <input
-              value={host}
-              onChange={(event) => setHost(event.target.value)}
-              placeholder="192.168.1.10 或 example.com"
-            />
-          </label>
-          <label className="field port-field">
-            <span>端口</span>
-            <input value={port} onChange={(event) => setPort(event.target.value)} />
-          </label>
+      <form
+        className="modal"
+        ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="conn-form-title"
+        onClick={(event) => event.stopPropagation()}
+        onSubmit={handleSubmit}
+      >
+        <div className="modal-head">
+          <h2 className="modal-title" id="conn-form-title">
+            {isCreate ? '新建连接' : '编辑连接'}
+          </h2>
         </div>
 
-        <label className="field">
-          <span>用户名</span>
-          <input value={username} onChange={(event) => setUsername(event.target.value)} />
-        </label>
-
-        <label className="field">
-          <span>认证方式</span>
-          <select
-            value={authType}
-            onChange={(event) => setAuthType(event.target.value as AuthType)}
-          >
-            <option value="password">密码</option>
-            <option value="privateKey">私钥</option>
-          </select>
-        </label>
-
-        {authType === 'password' ? (
+        <div className="modal-body">
           <label className="field">
-            <span>密码</span>
+            <span>名称</span>
             <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder={
-                clearCredential
-                  ? '已勾选清除，保存后密码被清空'
-                  : hasStoredCredential
-                    ? '留空表示保留已保存的密码'
-                    : '可选'
-              }
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="留空则使用 用户名@主机"
+              // 打开表单即聚焦第一个输入框，键盘用户不必先点一下
+              autoFocus
             />
           </label>
-        ) : (
-          <>
-            <label className="field">
-              <span>私钥文件</span>
-              <div className="field-row">
-                <input
-                  className="grow"
-                  value={privateKeyPath}
-                  onChange={(event) => setPrivateKeyPath(event.target.value)}
-                  placeholder="~/.ssh/id_ed25519"
-                />
-                <button type="button" onClick={pickPrivateKey}>
-                  选择
-                </button>
-              </div>
+
+          <div className="field-row">
+            <label className="field grow">
+              <span>主机</span>
+              <input
+                value={host}
+                onChange={(event) => setHost(event.target.value)}
+                placeholder="192.168.1.10 或 example.com"
+              />
             </label>
+            <label className="field port-field">
+              <span>端口</span>
+              <input value={port} onChange={(event) => setPort(event.target.value)} />
+            </label>
+          </div>
+
+          <label className="field">
+            <span>用户名</span>
+            <input value={username} onChange={(event) => setUsername(event.target.value)} />
+          </label>
+
+          <label className="field">
+            <span>认证方式</span>
+            <select
+              value={authType}
+              onChange={(event) => setAuthType(event.target.value as AuthType)}
+            >
+              <option value="password">密码</option>
+              <option value="privateKey">私钥</option>
+            </select>
+          </label>
+
+          {authType === 'password' ? (
             <label className="field">
-              <span>私钥口令</span>
+              <span>密码</span>
               <input
                 type="password"
-                value={passphrase}
-                onChange={(event) => setPassphrase(event.target.value)}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
                 placeholder={
                   clearCredential
-                    ? '已勾选清除，保存后口令被清空'
+                    ? '已勾选清除，保存后密码被清空'
                     : hasStoredCredential
-                      ? '留空表示保留已保存的口令'
-                      : '私钥未加密时留空'
+                      ? '留空表示保留已保存的密码'
+                      : '可选'
                 }
               />
             </label>
-          </>
-        )}
+          ) : (
+            <>
+              <label className="field">
+                <span>私钥文件</span>
+                <div className="field-row">
+                  <input
+                    className="grow mono-input"
+                    value={privateKeyPath}
+                    onChange={(event) => setPrivateKeyPath(event.target.value)}
+                    placeholder="~/.ssh/id_ed25519"
+                  />
+                  <button type="button" onClick={pickPrivateKey}>
+                    选择
+                  </button>
+                </div>
+              </label>
+              <label className="field">
+                <span>私钥口令</span>
+                <input
+                  type="password"
+                  value={passphrase}
+                  onChange={(event) => setPassphrase(event.target.value)}
+                  placeholder={
+                    clearCredential
+                      ? '已勾选清除，保存后口令被清空'
+                      : hasStoredCredential
+                        ? '留空表示保留已保存的口令'
+                        : '私钥未加密时留空'
+                  }
+                />
+              </label>
+            </>
+          )}
 
-        {hasStoredCredential && (
-          <label className="field">
-            <span className="field-row">
+          {hasStoredCredential && (
+            <label className="checkbox-row">
               <input
                 type="checkbox"
                 checked={clearCredential}
                 onChange={(event) => setClearCredential(event.target.checked)}
               />
               <span>清除已保存的凭据（同时清除密码与私钥口令，保存后生效）</span>
-            </span>
-          </label>
-        )}
+            </label>
+          )}
 
-        {error && <p className="form-error">{error}</p>}
+          {error && <p className="form-error">{error}</p>}
+        </div>
 
-        <div className="modal-actions">
+        <div className="modal-foot">
           <button type="button" onClick={onCancel}>
             取消
           </button>

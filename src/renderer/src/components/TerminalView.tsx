@@ -232,10 +232,12 @@ function TerminalView({
       fontFamily:
         '"Cascadia Mono", "JetBrains Mono", Consolas, Menlo, "Microsoft YaHei Mono", "Noto Sans Mono CJK SC", monospace',
       theme: {
-        background: '#1b1d23',
-        foreground: '#d7dae0',
-        cursor: '#7aa2f7',
-        selectionBackground: '#3b4261'
+        // 与界面令牌保持同一套色板：终端底色略深于面板底色，形成"屏幕"层次
+        background: '#15181f',
+        foreground: '#e7eaf0',
+        cursor: '#6d9bff',
+        cursorAccent: '#15181f',
+        selectionBackground: 'rgba(109, 155, 255, 0.3)'
       }
     })
     const fit = new FitAddon()

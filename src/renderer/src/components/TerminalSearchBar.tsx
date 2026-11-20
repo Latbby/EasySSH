@@ -121,6 +121,7 @@ function TerminalSearchBar({ search, focusTick, onClose }: Props): React.JSX.Ele
         className="term-search-input"
         value={keyword}
         placeholder="查找"
+        aria-label="在终端中查找"
         spellCheck={false}
         onChange={(event) => setKeyword(event.target.value)}
         onKeyDown={handleKeyDown}

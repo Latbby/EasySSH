@@ -32,13 +32,16 @@ function WorkspaceTabs({
 }: Props): React.JSX.Element {
   return (
     <div className="tabs-area">
-      <TabBar
-        tabs={tabs}
-        activeId={activeId}
-        onActivate={onActivate}
-        onClose={onClose}
-        onReconnect={onReconnect}
-      />
+      {/* 没有标签时不渲染标签栏，避免工作区顶部留下一条空条 */}
+      {tabs.length > 0 && (
+        <TabBar
+          tabs={tabs}
+          activeId={activeId}
+          onActivate={onActivate}
+          onClose={onClose}
+          onReconnect={onReconnect}
+        />
+      )}
 
       <div className="panes">
         {tabs.map((tab) =>
@@ -59,7 +62,24 @@ function WorkspaceTabs({
         {tabs.length === 0 && (
           <div className="empty-state">
             <p className="empty-title">还没有打开的会话</p>
-            <p className="empty-hint">在左侧点击连接打开终端，或点 ⇅ 打开 SFTP 文件管理</p>
+            <p className="empty-hint">
+              在左侧点击连接打开终端，或点 ⇅ 打开 SFTP 文件管理； 也可以直接在侧边栏顶部输入
+              user@host:22 回车直连。
+            </p>
+            <div className="empty-keys">
+              <span className="empty-key">
+                <span className="kbd">Ctrl</span>
+                <span className="kbd">N</span> 新建连接
+              </span>
+              <span className="empty-key">
+                <span className="kbd">Ctrl</span>
+                <span className="kbd">Tab</span> 切换标签
+              </span>
+              <span className="empty-key">
+                <span className="kbd">Ctrl</span>
+                <span className="kbd">F</span> 终端搜索
+              </span>
+            </div>
           </div>
         )}
       </div>

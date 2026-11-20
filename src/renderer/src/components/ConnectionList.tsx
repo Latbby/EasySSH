@@ -8,6 +8,8 @@ interface Props {
   secureAvailable: boolean
   /** 快速连接未写用户名时使用的默认用户名 */
   defaultUsername: string
+  /** 已有打开会话的连接 id，用于在列表里标出"已连接" */
+  activeIds: string[]
   /** 点击连接项，打开终端 */
   onConnect(vo: ConnectionVO): void
   /** 打开 SFTP 文件管理 */
@@ -33,6 +35,7 @@ function ConnectionList({
   connections,
   secureAvailable,
   defaultUsername,
+  activeIds,
   onConnect,
   onOpenSftp,
   onCreate,
@@ -114,37 +117,77 @@ function ConnectionList({
         />
       </div>
 
-      <ul className="conn-list">
-        {visible.map((vo) => (
-          <li key={vo.id} className="conn-item">
-            <button className="conn-main" onClick={() => onConnect(vo)}>
-              <span className="conn-name">{vo.name || `${vo.username}@${vo.host}`}</span>
-              <span className="conn-sub">
-                {vo.username}@{vo.host}:{vo.port}
-              </span>
-            </button>
-            <div className="conn-actions">
-              <button className="icon-btn" title="SFTP 文件管理" onClick={() => onOpenSftp(vo)}>
-                ⇅
-              </button>
-              <button className="icon-btn" title="编辑" onClick={() => onEdit(vo)}>
-                ✎
-              </button>
-              <button className="icon-btn" title="复制连接" onClick={() => onDuplicate(vo)}>
-                ⧉
-              </button>
-              <button className="icon-btn danger" title="删除" onClick={() => onRemove(vo)}>
-                ×
-              </button>
-            </div>
-          </li>
-        ))}
-      </ul>
-
+      {/* 空态提示紧跟在搜索框下方：列表区域会被 flex 撑开，放在列表之后会被推到侧栏底部 */}
       {connections.length === 0 && !key && (
-        <p className="hint-text">还没有连接，点「新建」添加一个</p>
+        <p className="hint-text">
+          还没有连接，点「新建」添加一个，或在上面输入 user@host:22 直接连接
+        </p>
       )}
       {key !== '' && visible.length === 0 && <p className="hint-text">没有匹配的连接</p>}
+
+      <ul className="conn-list">
+        {visible.map((vo) => {
+          const label = vo.name || `${vo.username}@${vo.host}`
+          const connected = activeIds.includes(vo.id)
+          return (
+            <li key={vo.id} className={connected ? 'conn-item session-active' : 'conn-item'}>
+              <button
+                className="conn-main"
+                onClick={() => onConnect(vo)}
+                title={`打开终端：${label}`}
+              >
+                <span className="conn-name">
+                  {/* 绿点表示这个连接已经有打开的会话 */}
+                  {connected && <span className="conn-dot" aria-hidden="true" />}
+                  {label}
+                </span>
+                <span className="conn-sub">
+                  {vo.username}@{vo.host}:{vo.port}
+                </span>
+              </button>
+              <div className="conn-actions">
+                <button
+                  className="icon-btn"
+                  title="SFTP 文件管理"
+                  aria-label={`打开 ${label} 的 SFTP 文件管理`}
+                  onClick={() => onOpenSftp(vo)}
+                >
+                  ⇅
+                </button>
+                <button
+                  className="icon-btn"
+                  title="编辑"
+                  aria-label={`编辑 ${label}`}
+                  onClick={() => onEdit(vo)}
+                >
+                  ✎
+                </button>
+                <button
+                  className="icon-btn"
+                  title="复制连接"
+                  aria-label={`复制 ${label}`}
+                  onClick={() => onDuplicate(vo)}
+                >
+                  ⧉
+                </button>
+                <button
+                  className="icon-btn danger"
+                  title="删除"
+                  aria-label={`删除 ${label}`}
+                  onClick={() => onRemove(vo)}
+                >
+                  ×
+                </button>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+
+      <footer className="sidebar-foot">
+        <span>共 {connections.length} 个连接</span>
+        <span>{activeIds.length > 0 ? `${activeIds.length} 个会话进行中` : ''}</span>
+      </footer>
     </aside>
   )
 }

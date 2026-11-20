@@ -299,6 +299,11 @@ function App(): React.JSX.Element {
     if (session.activeId) closeTab(session.activeId)
   }, [closeTab, session.activeId])
 
+  /** 已有打开会话的连接 id，用于在侧边栏把这些连接标成"已连接" */
+  const activeConnectionIds = session.tabs
+    .map((tab) => tab.source.connectionId)
+    .filter((id): id is string => Boolean(id))
+
   /**
    * 切换到相邻标签。
    * @param step 偏移量，+1 下一个、-1 上一个
@@ -444,6 +449,7 @@ function App(): React.JSX.Element {
         connections={connections}
         secureAvailable={secureAvailable}
         defaultUsername={defaultUsername}
+        activeIds={activeConnectionIds}
         onConnect={(vo) => void openTerminal({ connectionId: vo.id }, vo.name)}
         onOpenSftp={(vo) => void openSftp({ connectionId: vo.id }, vo.name)}
         onQuickConnect={quickConnect}
@@ -455,7 +461,7 @@ function App(): React.JSX.Element {
 
       <main className="workspace">
         {pendingLabel && (
-          <div className="status-bar">
+          <div className="status-bar" role="status" aria-live="polite">
             <span className="status-spinner" />
             <span className="status-text">{pendingLabel}</span>
           </div>
