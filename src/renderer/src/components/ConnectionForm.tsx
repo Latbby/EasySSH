@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AuthType, ConnectionVO, SaveConnectionDTO } from '@shared/types'
 import { toMessage } from '../utils'
 import { useFocusTrap } from '../useFocusTrap'
@@ -33,17 +33,47 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
   // 分组名可留空，空串表示未分组
   const [group, setGroup] = useState(initial?.group ?? '')
   const [authType, setAuthType] = useState<AuthType>(initial?.authType ?? 'password')
-  // 密码与口令永不回填，只以"留空即不修改"的语义提交
+  // 密码与口令在编辑已保存凭据的连接时由主进程回显，回显值原样提交即等价于不改动
   const [password, setPassword] = useState('')
   const [privateKeyPath, setPrivateKeyPath] = useState(initial?.privateKeyPath ?? '')
   const [passphrase, setPassphrase] = useState('')
+  /** 两个密码框是否明文显示，由各自的小眼睛按钮切换 */
+  const [passwordVisible, setPasswordVisible] = useState(false)
+  const [passphraseVisible, setPassphraseVisible] = useState(false)
+  /** 已保存凭据是否回显完成：未完成时输入框留空的语义仍是「保留」，文案按此提示 */
+  const [credentialEchoed, setCredentialEchoed] = useState(false)
   const [clearCredential, setClearCredential] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   /** 弹窗容器：Esc 关闭、Tab 循环与关闭后归还焦点都由焦点陷阱统一处理 */
   const modalRef = useRef<HTMLFormElement>(null)
+  /** 遮罩按下、松开标记：只有两者都落在遮罩上才关闭，避免在表单里拖选文字时误关弹窗 */
+  const pressOnMaskRef = useRef(false)
+  const releaseOnMaskRef = useRef(false)
 
   useFocusTrap(modalRef, onCancel)
+
+  // 编辑已保存凭据的连接时按需拉取明文回显，让用户看到库里实际存着的那份
+  useEffect(() => {
+    if (!hasStoredCredential || !initial?.id) return
+    let alive = true
+    void window.api.connections
+      .getCredential(initial.id)
+      .then((vo) => {
+        // 弹窗已关闭或已换连接时丢弃结果，避免对已卸载组件 setState
+        if (!alive) return
+        // 只回填非空项：某项为空说明这条连接没存它，输入框保持为空
+        if (vo.password) setPassword(vo.password)
+        if (vo.passphrase) setPassphrase(vo.passphrase)
+        setCredentialEchoed(true)
+      })
+      .catch(() => {
+        // 读取失败不弹错：输入框留空仍按「保留已保存的凭据」提交，不影响用户重新输入
+      })
+    return () => {
+      alive = false
+    }
+  }, [hasStoredCredential, initial?.id])
 
   /** 弹出系统文件选择框挑选私钥文件 */
   const pickPrivateKey = async (): Promise<void> => {
@@ -97,8 +127,41 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
     }
   }
 
+  // 回显成功后输入框本身就有值，占位文案只在没取到凭据时才会露出来
+  const passwordPlaceholder = clearCredential
+    ? '已勾选清除，保存后密码被清空'
+    : hasStoredCredential
+      ? credentialEchoed
+        ? '已回显，可修改'
+        : '留空表示保留已保存的密码'
+      : '可选'
+  const passphrasePlaceholder = clearCredential
+    ? '已勾选清除，保存后口令被清空'
+    : hasStoredCredential
+      ? credentialEchoed
+        ? '已回显，可修改'
+        : '留空表示保留已保存的口令'
+      : '私钥未加密时留空'
+
   return (
-    <div className="modal-mask" onClick={onCancel}>
+    <div
+      className="modal-mask"
+      onMouseDown={(event) => {
+        // 只记「落点是否就是遮罩本身」，表单内部的按下不算
+        pressOnMaskRef.current = event.target === event.currentTarget
+      }}
+      onMouseUp={(event) => {
+        releaseOnMaskRef.current = event.target === event.currentTarget
+      }}
+      onClick={(event) => {
+        // click 的目标是按下点与松开点的最近公共祖先：在输入框里按下、拖到遮罩上松开时
+        // 目标也会是遮罩，所以必须按下与松开都落在遮罩上才关闭
+        const onMask = pressOnMaskRef.current && releaseOnMaskRef.current
+        pressOnMaskRef.current = false
+        releaseOnMaskRef.current = false
+        if (onMask && event.target === event.currentTarget) onCancel()
+      }}
+    >
       {/* 表单内文本框回车会走浏览器隐式提交，等价于点「保存」 */}
       <form
         className="modal"
@@ -170,18 +233,26 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
           {authType === 'password' ? (
             <label className="field">
               <span>密码</span>
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder={
-                  clearCredential
-                    ? '已勾选清除，保存后密码被清空'
-                    : hasStoredCredential
-                      ? '留空表示保留已保存的密码'
-                      : '可选'
-                }
-              />
+              <div className="field-row">
+                <input
+                  className="grow"
+                  type={passwordVisible ? 'text' : 'password'}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder={passwordPlaceholder}
+                />
+                {/* 小眼睛：只在本次弹窗内切换明文，不改变提交内容 */}
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title={passwordVisible ? '隐藏密码' : '显示密码'}
+                  aria-label={passwordVisible ? '隐藏密码' : '显示密码'}
+                  aria-pressed={passwordVisible}
+                  onClick={() => setPasswordVisible((prev) => !prev)}
+                >
+                  <Icon name={passwordVisible ? 'eye-off' : 'eye'} size={14} />
+                </button>
+              </div>
             </label>
           ) : (
             <>
@@ -202,18 +273,26 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
               </label>
               <label className="field">
                 <span>私钥口令</span>
-                <input
-                  type="password"
-                  value={passphrase}
-                  onChange={(event) => setPassphrase(event.target.value)}
-                  placeholder={
-                    clearCredential
-                      ? '已勾选清除，保存后口令被清空'
-                      : hasStoredCredential
-                        ? '留空表示保留已保存的口令'
-                        : '私钥未加密时留空'
-                  }
-                />
+                <div className="field-row">
+                  <input
+                    className="grow"
+                    type={passphraseVisible ? 'text' : 'password'}
+                    value={passphrase}
+                    onChange={(event) => setPassphrase(event.target.value)}
+                    placeholder={passphrasePlaceholder}
+                  />
+                  {/* 小眼睛：只在本次弹窗内切换明文，不改变提交内容 */}
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title={passphraseVisible ? '隐藏口令' : '显示口令'}
+                    aria-label={passphraseVisible ? '隐藏口令' : '显示口令'}
+                    aria-pressed={passphraseVisible}
+                    onClick={() => setPassphraseVisible((prev) => !prev)}
+                  >
+                    <Icon name={passphraseVisible ? 'eye-off' : 'eye'} size={14} />
+                  </button>
+                </div>
               </label>
             </>
           )}

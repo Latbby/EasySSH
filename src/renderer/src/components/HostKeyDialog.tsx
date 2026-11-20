@@ -23,11 +23,29 @@ interface Props {
 function HostKeyDialog({ change, busy, onTrust, onCancel }: Props): React.JSX.Element {
   /** 弹窗容器：Esc 关闭与 Tab 循环交给焦点陷阱 */
   const dialogRef = useRef<HTMLDivElement>(null)
+  /** 遮罩按下/松开标记：只有两次都落在遮罩本身才关闭，避免在弹窗内拖选文字时误关 */
+  const pressOnMaskRef = useRef(false)
+  const releaseOnMaskRef = useRef(false)
 
   useFocusTrap(dialogRef, onCancel)
 
   return (
-    <div className="modal-mask" onClick={onCancel}>
+    <div
+      className="modal-mask"
+      onMouseDown={(event) => {
+        pressOnMaskRef.current = event.target === event.currentTarget
+      }}
+      onMouseUp={(event) => {
+        releaseOnMaskRef.current = event.target === event.currentTarget
+      }}
+      onClick={(event) => {
+        const clickedMask =
+          pressOnMaskRef.current && releaseOnMaskRef.current && event.target === event.currentTarget
+        pressOnMaskRef.current = false
+        releaseOnMaskRef.current = false
+        if (clickedMask) onCancel()
+      }}
+    >
       <div
         className="modal modal-wide"
         ref={dialogRef}

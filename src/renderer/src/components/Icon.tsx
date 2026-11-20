@@ -27,6 +27,8 @@ export type IconName =
   | 'plug'
   | 'alert'
   | 'check'
+  | 'eye'
+  | 'eye-off'
 
 /**
  * 图标路径表。
@@ -156,7 +158,21 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M8 11.1v.05" />
     </>
   ),
-  check: <path d="M3.8 8.4l2.8 2.8 5.6-5.8" />
+  check: <path d="M3.8 8.4l2.8 2.8 5.6-5.8" />,
+  eye: (
+    <>
+      <path d="M1.8 8S4.2 4.2 8 4.2 14.2 8 14.2 8 11.8 11.8 8 11.8 1.8 8 1.8 8z" />
+      <circle cx="8" cy="8" r="1.9" />
+    </>
+  ),
+  'eye-off': (
+    <>
+      <path d="M6.4 4.6A7.6 7.6 0 0 1 8 4.4c3.8 0 6.2 3.6 6.2 3.6a12 12 0 0 1-2.2 2.6" />
+      <path d="M9.7 9.9A2 2 0 0 1 6.1 8.3" />
+      <path d="M4.2 5.6A12.4 12.4 0 0 0 1.8 8s2.4 3.6 6.2 3.6c.9 0 1.7-.2 2.4-.5" />
+      <path d="M2.6 2.6l10.8 10.8" />
+    </>
+  )
 }
 
 interface Props {

@@ -51,23 +51,14 @@ export interface AssignGroupDTO {
   group: string
 }
 
-/** 导入结果出参 */
-export interface ImportResultVO {
-  /** 成功导入条数 */
-  imported: number
-  /** 因重复而跳过的条数 */
-  skipped: number
-  /** 逐条记录的跳过或失败原因，便于用户核对 */
-  errors: string[]
-}
-
-/** 导出结果出参 */
-export interface ExportResultVO {
-  exported: number
-  /** 实际写入的文件路径 */
-  path: string
-  /** 实际使用的格式，由保存框选择的扩展名决定 */
-  format: 'json' | 'openssh'
+/**
+ * 连接凭据出参。
+ * 仅供「编辑连接」表单按需回显已保存的密码与私钥口令，不参与列表查询；
+ * 渲染进程只在用户显式打开某个连接的编辑表单时才会拿到它。
+ */
+export interface ConnectionCredentialVO {
+  password?: string
+  passphrase?: string
 }
 
 /** 打开终端入参，支持已保存连接与一次性临时连接 */
@@ -150,48 +141,6 @@ export interface EditSessionVO {
   message?: string
 }
 
-/** 端口转发类型：本地、远程、动态（SOCKS5） */
-export type ForwardType = 'local' | 'remote' | 'dynamic'
-
-/** 端口转发运行状态 */
-export type ForwardStatus = 'running' | 'stopped' | 'error'
-
-/** 新建端口转发规则入参 */
-export interface ForwardRuleDTO {
-  /** 为空表示新增 */
-  id?: string
-  /** 已保存连接 id，与 inline 二选一 */
-  connectionId?: string
-  /** 临时连接配置，不落盘 */
-  inline?: SaveConnectionDTO
-  type: ForwardType
-  /** 监听地址：local/dynamic 为本地地址，remote 为远端地址 */
-  localHost: string
-  /** 监听端口 */
-  localPort: number
-  /** 目标地址：local/remote 使用，dynamic 忽略 */
-  remoteHost?: string
-  /** 目标端口 */
-  remotePort?: number
-}
-
-/** 端口转发规则出参 */
-export interface ForwardRuleVO {
-  id: string
-  type: ForwardType
-  localHost: string
-  localPort: number
-  remoteHost?: string
-  remotePort?: number
-  /** 列表展示名：来源连接名 + 转发描述 */
-  title: string
-  status: ForwardStatus
-  /** 出错时的中文说明 */
-  message?: string
-  /** 累计成功转发的连接数，用于判断隧道是否真的在工作 */
-  connections: number
-}
-
 /** 会话恢复：单个标签的来源（只记录已保存连接的 id，绝不落盘凭据） */
 export interface SessionTabDTO {
   kind: 'terminal' | 'sftp'
@@ -221,11 +170,9 @@ export const IPC = {
   connSave: 'conn:save',
   connRemove: 'conn:remove',
   connAssignGroup: 'conn:assign-group',
-  connImport: 'conn:import',
-  connExport: 'conn:export',
+  connCredential: 'conn:credential',
   secureAvailable: 'system:secure-available',
   pickPrivateKey: 'system:pick-private-key',
-  defaultUsername: 'system:default-username',
   clipboardRead: 'system:clipboard-read',
   clipboardWrite: 'system:clipboard-write',
   trustHostKey: 'system:trust-host-key',
@@ -247,11 +194,6 @@ export const IPC = {
   sftpTransfer: 'sftp:transfer',
   sftpEdit: 'sftp:edit',
   sftpEditEvent: 'sftp:edit-event',
-  forwardList: 'forward:list',
-  forwardStart: 'forward:start',
-  forwardStop: 'forward:stop',
-  forwardRemove: 'forward:remove',
-  forwardEvent: 'forward:event',
   sessionSave: 'session:save',
   sessionLoad: 'session:load',
   sessionClear: 'session:clear'
@@ -269,10 +211,11 @@ export interface SshClientApi {
     remove(id: string): Promise<void>
     /** 批量调整连接所属分组 */
     assignGroup(dto: AssignGroupDTO): Promise<ConnectionVO[]>
-    /** 从 OpenSSH 配置或本应用导出的 JSON 导入连接；用户取消时返回 null */
-    importFromFile(): Promise<ImportResultVO | null>
-    /** 导出连接到 JSON 或 OpenSSH 配置；用户取消时返回 null */
-    exportToFile(): Promise<ExportResultVO | null>
+    /**
+     * 读取某个连接已保存的凭据，仅供编辑表单按需回显。
+     * 只接受连接 id，不提供批量接口，避免凭据被无关流程带回渲染进程。
+     */
+    getCredential(id: string): Promise<ConnectionCredentialVO>
   }
   /** 系统能力 */
   system: {
@@ -280,8 +223,6 @@ export interface SshClientApi {
     secureAvailable(): Promise<boolean>
     /** 弹出文件选择框挑选私钥，取消时返回 null */
     pickPrivateKey(): Promise<string | null>
-    /** 当前系统登录用户名，作为快速连接的默认用户名 */
-    defaultUsername(): Promise<string>
     /** 读取系统剪贴板文本，终端粘贴用 */
     readClipboard(): Promise<string>
     /** 写入系统剪贴板，终端复制用 */
@@ -335,19 +276,6 @@ export interface SshClientApi {
     edit(sftpId: string, remotePath: string): Promise<EditSessionVO>
     /** 订阅编辑会话状态变化，返回取消订阅函数 */
     onEditEvent(listener: (vo: EditSessionVO) => void): () => void
-  }
-  /** 端口转发（隧道） */
-  forward: {
-    /** 查询全部规则 */
-    list(): Promise<ForwardRuleVO[]>
-    /** 新增并启动一条规则 */
-    start(dto: ForwardRuleDTO): Promise<ForwardRuleVO>
-    /** 停止规则但保留配置 */
-    stop(id: string): Promise<void>
-    /** 删除规则 */
-    remove(id: string): Promise<void>
-    /** 订阅规则状态变化，返回取消订阅函数 */
-    onEvent(listener: (vo: ForwardRuleVO) => void): () => void
   }
   /** 会话恢复：只记录已保存连接的 id 与标签类型，不落盘任何凭据 */
   session: {

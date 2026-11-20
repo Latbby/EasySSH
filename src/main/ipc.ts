@@ -1,14 +1,10 @@
 import { BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
 import { readFileSync } from 'fs'
-import { userInfo } from 'os'
 import {
   IPC,
   type AssignGroupDTO,
+  type ConnectionCredentialVO,
   type ConnectionVO,
-  type ExportResultVO,
-  type ForwardRuleDTO,
-  type ForwardRuleVO,
-  type ImportResultVO,
   type OpenSftpDTO,
   type OpenSftpVO,
   type OpenTerminalDTO,
@@ -36,9 +32,7 @@ import {
   type ResolvedSshConfig
 } from './ssh'
 import { SftpManager } from './sftp'
-import { exportConnectionsToFile, importConnectionsFromFile } from './config-io'
 import { editRemoteFile, closeEditSessions } from './edit'
-import { ForwardManager } from './forward'
 import { clearSession, loadSession, saveSession } from './session'
 
 /** 打开终端或 SFTP 的公共入参：已保存连接与临时连接二选一 */
@@ -68,14 +62,6 @@ function broadcast(channel: string, ...args: unknown[]): void {
  * 已经把 20MB 压成 35~45 条消息，IPC 序列化不再是瓶颈；合成压力测试里端口路径在 512KB/64KB
  * 分片下反而慢约 20%。因此这里保留批量合并后的普通 IPC 通道，不再引入 MessagePort 分支。
  */
-
-/**
- * 取当前用于弹系统对话框的窗口。
- * @returns 优先返回聚焦窗口，没有时返回第一个窗口
- */
-function dialogWindow(): BrowserWindow | undefined {
-  return BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-}
 
 /**
  * 读取私钥文件内容。
@@ -143,8 +129,6 @@ export function registerIpcHandlers(): IpcHandle {
   )
   // 上传与下载的进度经 IPC.sftpTransfer 广播，渲染进程据此画进度条
   const sftp = new SftpManager(pool, (vo: SftpTransferVO) => broadcast(IPC.sftpTransfer, vo))
-  // 端口转发复用同一个连接池，规则状态变化实时广播给面板
-  const forward = new ForwardManager(pool, (vo: ForwardRuleVO) => broadcast(IPC.forwardEvent, vo))
 
   ipcMain.handle(IPC.connList, (): ConnectionVO[] => listConnections())
   ipcMain.handle(IPC.connSave, (_event, dto: SaveConnectionDTO): ConnectionVO =>
@@ -154,13 +138,10 @@ export function registerIpcHandlers(): IpcHandle {
   ipcMain.handle(IPC.connAssignGroup, (_event, dto: AssignGroupDTO): ConnectionVO[] =>
     assignGroup(dto.ids, dto.group)
   )
-  ipcMain.handle(IPC.connImport, async (): Promise<ImportResultVO | null> => {
-    const win = dialogWindow()
-    return win ? importConnectionsFromFile(win) : null
-  })
-  ipcMain.handle(IPC.connExport, async (): Promise<ExportResultVO | null> => {
-    const win = dialogWindow()
-    return win ? exportConnectionsToFile(win) : null
+  // 只在用户打开编辑表单时按需回显该连接的凭据，不提供批量读取
+  ipcMain.handle(IPC.connCredential, (_event, id: string): ConnectionCredentialVO => {
+    const credential = resolveCredential(id)
+    return { password: credential.password, passphrase: credential.passphrase }
   })
   ipcMain.handle(IPC.secureAvailable, (): boolean => isSecureStorageAvailable())
 
@@ -177,8 +158,6 @@ export function registerIpcHandlers(): IpcHandle {
   })
   ipcMain.handle(IPC.clipboardRead, (): string => clipboard.readText())
   ipcMain.handle(IPC.clipboardWrite, (_event, text: string): void => clipboard.writeText(text))
-  // 快速连接需要默认用户名，取当前系统登录用户
-  ipcMain.handle(IPC.defaultUsername, (): string => userInfo().username)
   // 用户在主机密钥变更弹窗里确认后，把新指纹写入 known_hosts
   ipcMain.handle(IPC.trustHostKey, (_event, host: string, port: number): void =>
     trustPendingHostKey(host, port)
@@ -235,13 +214,6 @@ export function registerIpcHandlers(): IpcHandle {
       )
   )
 
-  ipcMain.handle(IPC.forwardList, (): ForwardRuleVO[] => forward.list())
-  ipcMain.handle(IPC.forwardStart, (_event, dto: ForwardRuleDTO): Promise<ForwardRuleVO> =>
-    forward.start(dto, resolveConfig(dto))
-  )
-  ipcMain.handle(IPC.forwardStop, (_event, id: string): Promise<void> => forward.stop(id))
-  ipcMain.handle(IPC.forwardRemove, (_event, id: string): Promise<void> => forward.remove(id))
-
   ipcMain.handle(IPC.sessionSave, (_event, snapshot: SessionSnapshotVO): void =>
     saveSession(snapshot)
   )
@@ -250,7 +222,6 @@ export function registerIpcHandlers(): IpcHandle {
 
   return {
     dispose: () => {
-      forward.dispose()
       pool.dispose()
     }
   }

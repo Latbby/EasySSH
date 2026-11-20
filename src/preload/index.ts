@@ -1,12 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import {
-  IPC,
-  type SshClientApi,
-  type SftpTransferVO,
-  type EditSessionVO,
-  type ForwardRuleVO
-} from '@shared/types'
+import { IPC, type SshClientApi, type SftpTransferVO, type EditSessionVO } from '@shared/types'
 
 /**
  * 渲染进程可用的业务 API。
@@ -18,13 +12,11 @@ const api: SshClientApi = {
     save: (dto) => ipcRenderer.invoke(IPC.connSave, dto),
     remove: (id) => ipcRenderer.invoke(IPC.connRemove, id),
     assignGroup: (dto) => ipcRenderer.invoke(IPC.connAssignGroup, dto),
-    importFromFile: () => ipcRenderer.invoke(IPC.connImport),
-    exportToFile: () => ipcRenderer.invoke(IPC.connExport)
+    getCredential: (id) => ipcRenderer.invoke(IPC.connCredential, id)
   },
   system: {
     secureAvailable: () => ipcRenderer.invoke(IPC.secureAvailable),
     pickPrivateKey: () => ipcRenderer.invoke(IPC.pickPrivateKey),
-    defaultUsername: () => ipcRenderer.invoke(IPC.defaultUsername),
     readClipboard: () => ipcRenderer.invoke(IPC.clipboardRead),
     writeClipboard: (text) => ipcRenderer.invoke(IPC.clipboardWrite, text),
     trustHostKey: (host, port) => ipcRenderer.invoke(IPC.trustHostKey, host, port),
@@ -70,17 +62,6 @@ const api: SshClientApi = {
       const handler = (_event: unknown, vo: EditSessionVO): void => listener(vo)
       ipcRenderer.on(IPC.sftpEditEvent, handler)
       return () => ipcRenderer.off(IPC.sftpEditEvent, handler)
-    }
-  },
-  forward: {
-    list: () => ipcRenderer.invoke(IPC.forwardList),
-    start: (dto) => ipcRenderer.invoke(IPC.forwardStart, dto),
-    stop: (id) => ipcRenderer.invoke(IPC.forwardStop, id),
-    remove: (id) => ipcRenderer.invoke(IPC.forwardRemove, id),
-    onEvent: (listener) => {
-      const handler = (_event: unknown, vo: ForwardRuleVO): void => listener(vo)
-      ipcRenderer.on(IPC.forwardEvent, handler)
-      return () => ipcRenderer.off(IPC.forwardEvent, handler)
     }
   },
   session: {
