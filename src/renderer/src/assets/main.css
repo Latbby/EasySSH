@@ -513,6 +513,9 @@ select:focus {
   bottom: 24px;
   transform: translateX(-50%);
   max-width: 70vw;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   background: #3b2027;
   border: 1px solid var(--danger);
   color: #ffd9e0;
@@ -521,4 +524,329 @@ select:focus {
   font-size: 12px;
   cursor: pointer;
   z-index: 20;
+}
+
+/* 提示条按类型着色，成功与普通信息用更柔和的配色 */
+.toast.success {
+  background: #17301f;
+  border-color: #3f9f63;
+  color: #ccf3d8;
+}
+
+.toast.info {
+  background: #1d2735;
+  border-color: var(--accent);
+  color: #d7e3ff;
+}
+
+.toast-text {
+  min-width: 0;
+  word-break: break-all;
+}
+
+.toast-close {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  background: transparent;
+  border-color: transparent;
+  color: inherit;
+  opacity: 0.75;
+  line-height: 1;
+}
+
+.toast-close:hover {
+  opacity: 1;
+  border-color: transparent;
+}
+
+/* ===== 侧边栏：快速连接与搜索 ===== */
+
+.quick-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.quick-connect input {
+  font-size: 12px;
+}
+
+.quick-connect-hint {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-connect-error {
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.conn-search {
+  padding: 6px 10px 0;
+}
+
+.conn-search input {
+  font-size: 12px;
+}
+
+/* ===== 工作区状态条：连接中 / 会话提示 ===== */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.status-spinner {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: status-spin 0.7s linear infinite;
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== 终端：搜索栏 ===== */
+
+.term-search {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.term-search-input {
+  width: 190px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.term-search-count {
+  min-width: 54px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.term-search-btn {
+  padding: 2px 7px;
+  font-size: 12px;
+}
+
+.term-search-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ===== 终端：右键菜单 ===== */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 154px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+.ctx-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 5px 8px;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 4px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.ctx-menu-item:hover:not(:disabled) {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+.ctx-menu-item:disabled {
+  color: #5c6373;
+}
+
+.ctx-menu-shortcut {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.ctx-menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+
+/* ===== 主机密钥变更确认弹窗 ===== */
+
+.modal.modal-wide {
+  width: 520px;
+}
+
+.fp-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fp-label {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.fp-value {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  background: #14161a;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 7px;
+}
+
+.fp-value.old {
+  color: #e0af68;
+}
+
+.fp-value.new {
+  color: var(--danger);
+}
+
+.modal-note {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ===== SFTP 面板：路径栏、选中行、内联编辑 ===== */
+
+.sftp-path-input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  padding: 3px 7px;
+}
+
+.sftp-row.clickable {
+  cursor: pointer;
+}
+
+.sftp-row.selected {
+  background: var(--panel-2);
+}
+
+.sftp-rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.sftp-newdir {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sftp-newdir input {
+  flex: 1;
+  font-size: 12px;
+}
+
+.sftp-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 拖拽上传提示层：必须穿透鼠标事件，否则会打断 dragover / drop */
+.sftp-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(23, 29, 41, 0.82);
+  border: 2px dashed var(--accent);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.sftp-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sftp-progress-track {
+  height: 5px;
+  background: #14161a;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.sftp-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s linear;
 }
