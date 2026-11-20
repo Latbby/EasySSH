@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ConnectionVO, SaveConnectionDTO } from '@shared/types'
+import type {
+  ConnectionVO,
+  SaveConnectionDTO,
+  SessionSnapshotVO,
+  SessionTabDTO
+} from '@shared/types'
 import type { HostKeyChangeVO } from '@shared/errors'
 import ConnectionList from './components/ConnectionList'
 import ConnectionForm from './components/ConnectionForm'
 import WorkspaceTabs from './components/WorkspaceTabs'
 import Toast from './components/Toast'
 import HostKeyDialog from './components/HostKeyDialog'
+import SessionRestoreBar from './components/SessionRestoreBar'
+import ForwardPanel from './components/ForwardPanel'
 import { asHostKeyChanged, toMessage } from './utils'
 import type { AppTab, AppToast, TabSource, TerminalTab, ToastKind } from './types'
 
@@ -81,6 +88,11 @@ function App(): React.JSX.Element {
   const [pendingLabel, setPendingLabel] = useState<string | null>(null)
   const [hostKey, setHostKey] = useState<HostKeyPrompt | null>(null)
   const [trusting, setTrusting] = useState(false)
+  /** 上次退出时留下的会话快照，非空时显示恢复提示条 */
+  const [restore, setRestore] = useState<SessionSnapshotVO | null>(null)
+  const [restoring, setRestoring] = useState(false)
+  /** 端口转发面板是否展开 */
+  const [forwardOpen, setForwardOpen] = useState(false)
 
   /** sessionId 到 xterm 写入函数，输出按会话精确分发，避免每个标签各自过滤全量数据 */
   const writers = useRef(new Map<string, (data: Uint8Array) => void>())
@@ -124,7 +136,26 @@ function App(): React.JSX.Element {
       .defaultUsername()
       .then(setDefaultUsername)
       .catch(() => undefined)
+    // 上次退出时若还有会话，交给用户决定是否恢复（自动连服务器会让人意外）
+    window.api.session
+      .load()
+      .then((snapshot) => setRestore(snapshot && snapshot.tabs.length > 0 ? snapshot : null))
+      .catch(() => undefined)
   }, [showToast])
+
+  // 标签变化后延迟写入会话快照：只记录已保存连接的 id 与类型，不落盘任何凭据
+  useEffect(() => {
+    const tabs = session.tabs
+      .map((tab) => ({ kind: tab.kind, connectionId: tab.source.connectionId }))
+      .filter((item): item is SessionTabDTO => Boolean(item.connectionId))
+    // 空会话不覆盖上次的快照，否则启动时的空状态会把恢复机会抹掉
+    if (tabs.length === 0) return
+    const timer = window.setTimeout(
+      () => void window.api.session.save({ tabs, savedAt: Date.now() }),
+      800
+    )
+    return () => window.clearTimeout(timer)
+  }, [session.tabs])
 
   // 组件卸载时清掉提示计时器，避免对已卸载组件写入状态
   useEffect(() => () => window.clearTimeout(toastTimer.current), [])
@@ -426,6 +457,38 @@ function App(): React.JSX.Element {
   )
 
   /**
+   * 按快照逐个重开上次的标签。
+   * 连接已被删除的标签会跳过，最后清掉快照避免下次再问。
+   */
+  const restoreSession = useCallback(async (): Promise<void> => {
+    if (!restore) return
+    setRestoring(true)
+    let opened = 0
+    try {
+      for (const tab of restore.tabs) {
+        const vo = connections.find((item) => item.id === tab.connectionId)
+        if (!vo) continue
+        if (tab.kind === 'terminal') await openTerminal({ connectionId: vo.id }, vo.name)
+        else await openSftp({ connectionId: vo.id }, vo.name)
+        opened += 1
+      }
+      await window.api.session.clear()
+      setRestore(null)
+      showToast(opened > 0 ? 'success' : 'info', `已恢复 ${opened} 个会话`)
+    } catch (err) {
+      showToast('error', toMessage(err))
+    } finally {
+      setRestoring(false)
+    }
+  }, [connections, openSftp, openTerminal, restore, showToast])
+
+  /** 忽略上次的会话快照并清掉，避免每次启动都被追问 */
+  const dismissRestore = useCallback((): void => {
+    void window.api.session.clear()
+    setRestore(null)
+  }, [])
+
+  /**
    * 删除连接，删除前二次确认。
    * @param vo 待删除的连接
    */
@@ -457,9 +520,21 @@ function App(): React.JSX.Element {
         onDuplicate={duplicateConnection}
         onEdit={(vo) => setEditor({ mode: 'edit', vo })}
         onRemove={removeConnection}
+        onNotify={showToast}
+        onOpenForward={() => setForwardOpen(true)}
       />
 
       <main className="workspace">
+        {restore && (
+          <SessionRestoreBar
+            snapshot={restore}
+            titles={Object.fromEntries(connections.map((vo) => [vo.id, vo.name || vo.host]))}
+            busy={restoring}
+            onRestore={() => void restoreSession()}
+            onDismiss={dismissRestore}
+          />
+        )}
+
         {pendingLabel && (
           <div className="status-bar" role="status" aria-live="polite">
             <span className="status-spinner" />
@@ -493,6 +568,15 @@ function App(): React.JSX.Element {
           busy={trusting}
           onTrust={() => void trustAndRetry()}
           onCancel={() => setHostKey(null)}
+        />
+      )}
+
+      {forwardOpen && (
+        <ForwardPanel
+          open={forwardOpen}
+          connections={connections}
+          onNotify={showToast}
+          onClose={() => setForwardOpen(false)}
         />
       )}
 
