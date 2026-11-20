@@ -1,6 +1,6 @@
-# SSH 客户端
+# EasySSH
 
-一个可保存连接的跨平台 SSH 客户端，基于 Electron + TypeScript 构建。
+一个可保存连接的跨平台 SSH 客户端（EasySSH），基于 Electron + TypeScript 构建。
 
 ## 技术栈
 
@@ -28,7 +28,7 @@ src/
 │  ├─ edit.ts             远程文件编辑：下载到临时目录、系统程序打开、保存后回传
 │  ├─ session.ts          会话快照的读写与校验（只落连接 id 与标签类型）
 │  ├─ errors.ts           ssh2 / Node 原始错误的中文化翻译
-│  └─ store.ts            连接配置持久化、分组与凭据加解密
+│  └─ store.ts            连接与分组持久化、凭据加解密
 ├─ preload/index.ts       经 contextBridge 暴露的业务 API
 └─ renderer/src/
    ├─ App.tsx             根组件，编排连接列表、标签、提示与全局快捷键
@@ -125,7 +125,9 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
   复制连接会把源连接已保存的密码与私钥口令一并带入（表单里可见、可改）
 - 侧栏与工作区之间可拖动分配宽度（默认 300px）：拖动实时生效、双击或 Home 复位、
   方向键微调、宽度持久化，窗口变窄时自动收拢以免挤掉工作区（工作区保底 480px）
-- 连接分组：侧栏按分组折叠展示、可批量移动分组
+- 连接分组：侧栏按分组折叠展示，可新建 / 重命名 / 删除分组（空分组也会保留并在侧栏显示计数 0），
+  重命名会同步组内连接、删除分组只把组内连接变为未分组；表单与「移动到分组」都用下拉框选择分组，
+  并可在下拉里直接新建
 - 密码与私钥口令经 Electron safeStorage 加密，明文不落盘，列表出参不回流凭据；
   编辑连接时按需回显该连接已保存的凭据，并可用输入框右侧的小眼睛切换明文 / 密文显示
 - 同一连接的终端标签与 SFTP 面板共享一条 SSH 连接，减少握手与 `MaxSessions` 压力
@@ -195,8 +197,8 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
 
 `npm run build:win` 产出：
 
-- `dist/win-unpacked/` —— 免安装目录版，直接运行其中的 `ssh-client.exe`（推荐）
-- `dist/ssh-client-<版本>-win.zip` —— 上述目录的压缩包
+- `dist/win-unpacked/` —— 免安装目录版，直接运行其中的 `EasySSH.exe`（推荐）
+- `dist/` 下的 zip 包（`EasySSH-<版本>-win.zip`）—— 上述目录的压缩包
 
 **刻意不使用 NSIS 安装包与 portable 单文件版**：
 
@@ -207,6 +209,12 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
 两者都不如目录版可靠。确实需要正式安装包时，在普通机器上把 `win.target` 换回 `nsis` 重新打包。
 
 ## 环境备注
+
+数据目录：应用名是 `EasySSH`，配置位于 `%APPDATA%\EasySSH`（连接 `connections.json`、分组
+`groups.json`、已知主机 `known_hosts.json`、会话快照 `session.json`）。
+早期版本名为 `ssh-client`，数据目录是 `%APPDATA%\ssh-client`：新版本首次启动时若发现旧目录而
+新目录里没有对应文件，会**自动复制**上述四个文件过来（不覆盖已有数据），老用户的连接不会丢。
+主题、字号与侧栏宽度这些界面偏好也存在同一个 localStorage 里，读取时会回退读取旧键名。
 
 本机开发环境若设置了 `ELECTRON_RUN_AS_NODE=1`，`electron.exe` 会退化成纯 Node 运行、
 无法启动图形界面，需要在该变量未设置的环境下启动应用或运行 `verify:e2e`
@@ -220,19 +228,19 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
 真正会让"双击毫无反应"的是产物的**强制完整性标签**（Mandatory Integrity Label）。Windows 的
 完整性级别按文件标签继承：若打包发生在带 `Low Mandatory Level` 标签的目录下（例如被 Windows
 沙箱打标过的目录 —— 沙箱以受限令牌 + Low 完整性派生进程，它在工作区里新建的文件会继承这个可
-继承的 Low 标签），产物中的 `ssh-client.exe` 也会带上该标签。此后即使只是普通双击，Windows 也会
+继承的 Low 标签），产物中的 `EasySSH.exe` 也会带上该标签。此后即使只是普通双击，Windows 也会
 把进程降到 Low 完整性级别；而 Low IL 进程无法为 Chromium 的沙箱子进程在 `%TEMP%`、`%APPDATA%`
 这类 Medium 目录上配置 ACL（Chromium 日志原文：`Failed to create network context data directory
 … 拒绝访问。 (0x5)`），浏览器进程会在主进程 JS 执行之前以 `0x80000003`
 （STATUS_BREAKPOINT）退出。
 
 表现特征：**没有窗口、没有日志、没有崩溃转储**，`%TEMP%` 与 exe 目录下都找不到
-`ssh-client-startup.log`，事件日志里也没有 Application Error —— 与"被安全软件静默拦截"极像，
+`easyssh-startup.log`，事件日志里也没有 Application Error —— 与"被安全软件静默拦截"极像，
 但原因完全不同。
 
 判断方法：
 
-- `icacls dist\win-unpacked\ssh-client.exe` 输出中出现 `Mandatory Label\Low Mandatory Level`；
+- `icacls dist\win-unpacked\EasySSH.exe` 输出中出现 `Mandatory Label\Low Mandatory Level`；
 - 把产物整个目录复制到桌面等普通目录后双击可以正常打开（复制件不再继承该标签）；
 - 带 `--no-sandbox` 启动也能打开 —— 因为不再需要为沙箱子进程配置 ACL。
 
@@ -252,4 +260,4 @@ SFTP 服务端，因此无需真实的 SSH 服务器。
 - `start.bat` / `start.lnk`：带 `--no-sandbox` 的兜底启动器，仅在标签无法重置时使用。
 
 主进程会把启动全过程写入日志，包括未捕获异常与渲染进程加载失败。日志按以下顺序挑选第一个可写
-位置：`%TEMP%\ssh-client-startup.log` → `<userData>\startup.log` → exe 所在目录。
+位置：`%TEMP%\easyssh-startup.log` → `<userData>\startup.log` → exe 所在目录。

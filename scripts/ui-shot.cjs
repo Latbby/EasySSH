@@ -5,7 +5,7 @@
  *   1. 在 127.0.0.1:2323 起一个 ssh2 测试服务：接受任意认证、shell 回显真实感的会话内容、
  *      sftp 子系统挂一个内存文件系统（/home/tester 下有 docs/、logs/、readme.txt、deploy.sh 等）
  *   2. 启动 Electron：优先环境变量 E2E_ELECTRON_BIN（开发态，参数 ['.']，cwd 为仓库根，需先 npm run build），
- *      否则回退到 dist/win-unpacked/ssh-client.exe；固定调试端口 9455
+ *      否则回退到 dist/win-unpacked/EasySSH.exe；固定调试端口 9455
  *      （与 e2e-smoke.cjs 的 9333、另一名验证者的 2222/9333 全部错开）
  *   3. 用 CDP 固定视口（默认 1360x860，--dpr 可放大像素密度，支持 1 / 1.25 / 1.5 / 2 等小数），
  *      通过 DOM 事件、CDP 输入注入与 window.api 驱动界面
@@ -237,7 +237,7 @@ const S_IFREG = 0o100000
  * @returns {Buffer} 内容缓冲区
  */
 function filler(size) {
-  const line = 'ssh-client ui-shot fixture line\n'
+  const line = 'easyssh ui-shot fixture line\n'
   const buffer = Buffer.alloc(size)
   for (let offset = 0; offset < size; offset += line.length) {
     buffer.write(line.slice(0, Math.min(line.length, size - offset)), offset, 'utf8')
@@ -568,7 +568,7 @@ const SHELL_COMMANDS = {
     'Mem:            3941        1226        1408',
     'Swap:           2047           0        2047'
   ].join('\r\n'),
-  'cat readme.txt': '这是 ssh-client 的 UI 截图夹具目录，仅供本地测试使用。'
+  'cat readme.txt': '这是 EasySSH 的 UI 截图夹具目录，仅供本地测试使用。'
 }
 
 /**
@@ -1025,7 +1025,7 @@ const PAGE_HELPERS = `
   shot.themeState = () => ({
     theme: document.documentElement.dataset.theme || '',
     colorScheme: document.documentElement.style.colorScheme || '',
-    stored: window.localStorage.getItem('ssh-client:theme') || '',
+    stored: window.localStorage.getItem('easyssh:theme') || '',
     toggleTitle: (document.querySelector('.theme-toggle') || {}).title || '',
     toggleIcon: document.querySelector('.theme-toggle svg use')
       ? document.querySelector('.theme-toggle svg use').getAttribute('href') ||
@@ -3406,7 +3406,20 @@ const CHECKS = [
       await ctx.cdp.evaluate(`window.__uiShot.setField('主机', 'staging-01.internal')`)
       await ctx.cdp.evaluate(`window.__uiShot.setField('端口', '22')`)
       await ctx.cdp.evaluate(`window.__uiShot.setField('用户名', 'deploy')`)
-      await ctx.cdp.evaluate(`window.__uiShot.setSelect('.modal select', 'privateKey')`)
+      // 表单里有两个下拉框（分组、认证方式），必须按字段标签定位，不能取第一个 select
+      await ctx.cdp.evaluate(
+        `(() => {
+          const field = Array.from(document.querySelectorAll('.modal .field')).find((el) =>
+            (el.querySelector('span')?.textContent || '') === '认证方式'
+          )
+          if (!field) throw new Error('找不到认证方式字段')
+          const select = field.querySelector('select')
+          const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+          setter.call(select, 'privateKey')
+          select.dispatchEvent(new Event('change', { bubbles: true }))
+          return true
+        })()`
+      )
       await waitFor(
         ctx.cdp,
         `window.__uiShot.text('.modal').includes('私钥文件') && window.__uiShot.text('.modal').includes('私钥口令')`,
@@ -3416,7 +3429,12 @@ const CHECKS = [
         `window.__uiShot.setField('私钥文件', 'C:\\\\Users\\\\deploy\\\\.ssh\\\\id_ed25519')`
       )
       await ctx.cdp.evaluate(`window.__uiShot.setField('私钥口令', 'ed25519-passphrase')`)
-      const authType = await ctx.cdp.evaluate(`document.querySelector('.modal select').value`)
+      const authType = await ctx.cdp.evaluate(`(() => {
+        const field = Array.from(document.querySelectorAll('.modal .field')).find((el) =>
+          (el.querySelector('span')?.textContent || '') === '认证方式'
+        )
+        return field ? field.querySelector('select').value : ''
+      })()`)
       if (authType !== 'privateKey') throw new Error(`认证方式未切到私钥，实际 ${authType}`)
       await sleep(250)
     }
@@ -4150,7 +4168,7 @@ function resolveElectron() {
       mode: '开发态（E2E_ELECTRON_BIN）'
     }
   }
-  const packaged = path.join(PROJECT_ROOT, 'dist', 'win-unpacked', 'ssh-client.exe')
+  const packaged = path.join(PROJECT_ROOT, 'dist', 'win-unpacked', 'EasySSH.exe')
   if (fs.existsSync(packaged)) {
     return {
       command: packaged,
@@ -4159,7 +4177,7 @@ function resolveElectron() {
     }
   }
   throw new Error(
-    '既没有设置 E2E_ELECTRON_BIN，也没有 dist/win-unpacked/ssh-client.exe，无法启动 Electron'
+    '既没有设置 E2E_ELECTRON_BIN，也没有 dist/win-unpacked/EasySSH.exe，无法启动 Electron'
   )
 }
 
@@ -4195,7 +4213,7 @@ async function main() {
 
   const electron = resolveElectron()
   fs.mkdirSync(options.outDir, { recursive: true })
-  USER_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-client-ui-shot-'))
+  USER_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'easyssh-ui-shot-'))
   printHeader(electron, options)
   console.log(`[信息] 本次计划截图：${planned.join(', ') || '（无）'}`)
   console.log(`[信息] 本次计划检查：${checkList.map((check) => check.id).join(', ') || '（无）'}`)
@@ -4264,7 +4282,7 @@ async function main() {
     console.log(`[信息] 测试 SSH 服务已启动 127.0.0.1:${SSH_PORT}`)
 
     logFd = fs.openSync(logFile, 'w')
-    const env = { ...process.env, SSH_CLIENT_USER_DATA: USER_DATA_DIR }
+    const env = { ...process.env, EASYSSH_USER_DATA: USER_DATA_DIR }
     // 本环境默认注入 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node 运行，必须剔除
     delete env.ELECTRON_RUN_AS_NODE
     child = spawn(electron.command, electron.args, {

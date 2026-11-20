@@ -53,7 +53,7 @@ const FAKE_HOME = '/home'
 const MANY_FILES = 2000
 
 /** 使用临时 userData 目录，避免污染真实用户配置 */
-const USER_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-client-e2e-'))
+const USER_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'easyssh-e2e-'))
 
 let passed = 0
 
@@ -946,7 +946,7 @@ async function main() {
   console.log(`[信息] 测试 SSH 服务已启动 127.0.0.1:${SSH_PORT}（主机密钥 A 指纹 ${fingerprintA}）`)
 
   // 优先用打包产物验证：它最接近用户双击运行的真实形态
-  const packagedExe = path.join(PROJECT_ROOT, 'dist', 'win-unpacked', 'ssh-client.exe')
+  const packagedExe = path.join(PROJECT_ROOT, 'dist', 'win-unpacked', 'EasySSH.exe')
   const usePackaged = fs.existsSync(packagedExe)
   // 开发态默认用 node_modules 里的 electron，可用 E2E_ELECTRON_BIN 指向副本
   // （工作区被沙箱打标时 node_modules/electron/dist/electron.exe 带 Low 完整性标签，无法启动）
@@ -967,7 +967,7 @@ async function main() {
 
   // 输出重定向到文件而非管道，便于排查启动失败
   const logFd = fs.openSync(LOG_FILE, 'w')
-  const env = { ...process.env, SSH_CLIENT_USER_DATA: USER_DATA_DIR }
+  const env = { ...process.env, EASYSSH_USER_DATA: USER_DATA_DIR }
   // 本环境默认注入 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node 运行，必须剔除
   delete env.ELECTRON_RUN_AS_NODE
   const child = spawn(command, args, {
@@ -1498,7 +1498,7 @@ async function main() {
     // 12. 其它本轮新增交互的冒烟检查：窗口标题、连接搜索过滤、复制连接、右键菜单、字号持久化
     // -----------------------------------------------------------------------
     // 12.1 窗口标题跟随当前标签（标签标题是已保存连接的名称）
-    if (!(await waitFor(cdp, `document.title === 'E2E 密钥变更机 · SSH 客户端'`, 5000))) {
+    if (!(await waitFor(cdp, `document.title === 'E2E 密钥变更机 · EasySSH'`, 5000))) {
       const currentTitle = await cdp.evaluate(`document.title`)
       throw new Error(`窗口标题未跟随当前标签，实际=${currentTitle}`)
     }
@@ -1583,13 +1583,13 @@ async function main() {
     await cdp.dispatchKey({ key: '=', code: 'Equal', windowsVirtualKeyCode: 187, modifiers: 2 })
     await waitForCondition(
       cdp,
-      `window.localStorage.getItem('ssh-client:font-size') === '15'`,
+      `window.localStorage.getItem('easyssh:font-size') === '15'`,
       'Ctrl+= 放大字号并持久化为 15'
     )
     await cdp.dispatchKey({ key: '0', code: 'Digit0', windowsVirtualKeyCode: 48, modifiers: 2 })
     await waitForCondition(
       cdp,
-      `window.localStorage.getItem('ssh-client:font-size') === '14'`,
+      `window.localStorage.getItem('easyssh:font-size') === '14'`,
       'Ctrl+0 把字号复位为默认值 14'
     )
 
@@ -1597,7 +1597,7 @@ async function main() {
     // 12.6 主题：点击切换浅 / 深色、终端配色跟随、localStorage 持久化、右键回到跟随系统
     // -----------------------------------------------------------------------
     const themeProbe = `JSON.stringify({
-      mode: window.localStorage.getItem('ssh-client:theme'),
+      mode: window.localStorage.getItem('easyssh:theme'),
       theme: document.documentElement.dataset.theme,
       colorScheme: document.documentElement.style.colorScheme,
       systemDark: window.matchMedia('(prefers-color-scheme: dark)').matches,
@@ -1712,7 +1712,19 @@ async function main() {
       throw new Error('移动到分组弹窗在「弹窗内按下、遮罩上松手」时被误关')
     }
     pass('移动到分组弹窗不会因在弹窗内按下、遮罩上松手而误关')
-    await cdp.evaluate(`window.__e2eUI.setField('分组名', 'E2E 分组')`)
+    // 分组已改为下拉框：选「＋ 新建分组…」哨兵项，再填新分组名称
+    await cdp.evaluate(`(() => {
+      const select = document.querySelector('.modal select')
+      if (!select) throw new Error('移动到分组弹窗里没有分组下拉框')
+      const option = Array.from(select.options).find((item) => item.textContent.includes('新建分组'))
+      if (!option) throw new Error('下拉框缺少「新建分组…」选项')
+      // React 受控组件必须走原生 value setter + change 事件才能被感知
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+      setter.call(select, option.value)
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      return true
+    })()`)
+    await cdp.evaluate(`window.__e2eUI.setField('新分组名称', 'E2E 分组')`)
     await cdp.evaluate(`window.__e2eUI.click('.modal-foot button[type="submit"]')`)
     await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '保存分组后弹窗关闭')
     await waitForCondition(
@@ -1727,6 +1739,13 @@ async function main() {
       throw new Error(`分组未落盘，IPC 回读结果为 ${groupFromIpc}`)
     }
     pass(`分组经 store 落盘且 IPC 回读一致（${groupFromIpc}）`)
+    const groupsFromIpc = await cdp.evaluate(
+      `(async () => JSON.stringify(await window.api.connections.groups()))()`
+    )
+    if (!groupsFromIpc.includes('E2E 分组')) {
+      throw new Error(`分组未登记到分组列表，groups() 回读为 ${groupsFromIpc}`)
+    }
+    pass(`下拉框新建的分组已登记到分组列表（groups() = ${groupsFromIpc}）`)
 
     const itemsBeforeCollapse = await cdp.evaluate(`document.querySelectorAll('.conn-item').length`)
     if (itemsBeforeCollapse < 2) {
@@ -1744,6 +1763,98 @@ async function main() {
       `document.querySelectorAll('.conn-item').length === ${itemsBeforeCollapse}`,
       '再次点击分组标题后展开，连接重新出现'
     )
+
+    // 12.7b 新建空分组：侧栏按钮 → 命名弹窗 → 空分组以计数 0 立即出现
+    await cdp.evaluate(`window.__e2eUI.click('.sidebar-head-actions .icon-btn[title="新建分组"]')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '新建分组'`,
+      '点击「新建分组」打开命名弹窗'
+    )
+    await cdp.evaluate(`window.__e2eUI.setField('分组名', 'E2E 空分组')`)
+    await cdp.evaluate(`window.__e2eUI.click('.modal-foot button[type="submit"]')`)
+    await waitForCondition(
+      cdp,
+      `Array.from(document.querySelectorAll('.conn-group-name')).some((el) => el.textContent === 'E2E 空分组')`,
+      '新建的空分组立即出现在侧栏'
+    )
+    const emptyGroupCount = await cdp.evaluate(`(() => {
+      const row = Array.from(document.querySelectorAll('.conn-group-head')).find((el) =>
+        el.textContent.includes('E2E 空分组')
+      )
+      return row ? (row.querySelector('.conn-group-count')?.textContent ?? '') : null
+    })()`)
+    assert(emptyGroupCount === '0', `空分组计数显示为 0（实际 ${emptyGroupCount}）`)
+
+    // 12.7c 重命名分组：分组行聚焦后出现操作按钮 → 改名 → 侧栏与 groups() 同步更新
+    await cdp.evaluate(`(() => {
+      const row = Array.from(document.querySelectorAll('.conn-group-head')).find((el) =>
+        el.textContent.includes('E2E 空分组')
+      )
+      if (!row) throw new Error('找不到空分组行')
+      // 分组操作按钮在行获得焦点时出现；React 监听的是委托的 focusin
+      row.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+      return true
+    })()`)
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.conn-group-tools .icon-btn[title^="重命名分组"]')`,
+      '分组行聚焦后出现重命名与删除按钮'
+    )
+    await cdp.evaluate(`window.__e2eUI.click('.conn-group-tools .icon-btn[title^="重命名分组"]')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '重命名分组'`,
+      '打开重命名分组弹窗'
+    )
+    await cdp.evaluate(`window.__e2eUI.setField('分组名', 'E2E 空分组-改')`)
+    await cdp.evaluate(`window.__e2eUI.click('.modal-foot button[type="submit"]')`)
+    await waitForCondition(
+      cdp,
+      `Array.from(document.querySelectorAll('.conn-group-name')).some((el) => el.textContent === 'E2E 空分组-改')`,
+      '重命名后侧栏显示新分组名'
+    )
+    const renamedGroups = await cdp.evaluate(
+      `(async () => JSON.stringify(await window.api.connections.groups()))()`
+    )
+    if (!renamedGroups.includes('E2E 空分组-改') || renamedGroups.includes('"E2E 空分组"')) {
+      throw new Error(`重命名未同步到分组列表：groups() = ${renamedGroups}`)
+    }
+    pass(`重命名分组已同步到主进程分组列表（groups() = ${renamedGroups}）`)
+
+    // 12.7d 删除分组：确认弹窗 → 分组从侧栏消失
+    await cdp.evaluate(`(() => {
+      const row = Array.from(document.querySelectorAll('.conn-group-head')).find((el) =>
+        el.textContent.includes('E2E 空分组-改')
+      )
+      if (!row) throw new Error('找不到待删除分组行')
+      row.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+      return true
+    })()`)
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.conn-group-tools .icon-btn[title^="删除分组"]')`,
+      '分组行出现删除按钮'
+    )
+    await cdp.evaluate(`window.__e2eUI.click('.conn-group-tools .icon-btn[title^="删除分组"]')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '删除分组'`,
+      '打开删除分组确认弹窗'
+    )
+    await cdp.evaluate(`window.__e2eUI.click('.modal-foot button[type="submit"]')`)
+    await waitForCondition(
+      cdp,
+      `!Array.from(document.querySelectorAll('.conn-group-name')).some((el) => el.textContent === 'E2E 空分组-改')`,
+      '删除后该分组从侧栏消失'
+    )
+    const groupsAfterRemove = await cdp.evaluate(
+      `(async () => JSON.stringify(await window.api.connections.groups()))()`
+    )
+    if (groupsAfterRemove.includes('E2E 空分组-改')) {
+      throw new Error(`删除后分组仍登记在列表中：${groupsAfterRemove}`)
+    }
+    pass(`删除分组已同步到主进程分组列表（groups() = ${groupsAfterRemove}）`)
 
     // -----------------------------------------------------------------------
     // 12.8 导入 / 导出：该功能已按用户要求移除，相关用例与 verify-config-io.cjs 一并删除，
@@ -2210,7 +2321,7 @@ async function main() {
           return {
             cssVar: app ? getComputedStyle(app).getPropertyValue('--sidebar-width').trim() : null,
             sidebarWidth: sidebar ? Math.round(sidebar.getBoundingClientRect().width) : null,
-            stored: window.localStorage.getItem('ssh-client:sidebar-width'),
+            stored: window.localStorage.getItem('easyssh:sidebar-width'),
             innerWidth: window.innerWidth,
             maxAllowed: Math.max(240, Math.min(560, window.innerWidth - 486)),
             dragging: !!splitter && splitter.classList.contains('dragging'),
@@ -2561,7 +2672,7 @@ async function main() {
       const hud = host ? host.querySelector('.term-hud') : null
       const screen = host ? host.querySelector('.xterm-screen') : null
       return {
-        stored: window.localStorage.getItem('ssh-client:font-size'),
+        stored: window.localStorage.getItem('easyssh:font-size'),
         rowsFontSize: rows ? getComputedStyle(rows).fontSize : null,
         rowHeight: firstRow ? Number(firstRow.getBoundingClientRect().height.toFixed(2)) : null,
         screenHeight: screen ? Number(screen.getBoundingClientRect().height.toFixed(2)) : null,
@@ -2685,14 +2796,14 @@ async function main() {
     await cdp.evaluate(`window.__e2eUI.clickByText('.ctx-menu-item', '放大字号')`)
     await waitForCondition(
       cdp,
-      `window.localStorage.getItem('ssh-client:font-size') === '15' && !document.querySelector('.ctx-menu')`,
+      `window.localStorage.getItem('easyssh:font-size') === '15' && !document.querySelector('.ctx-menu')`,
       '点「放大字号」后字号变为 15，且菜单收起'
     )
     await openTerminalMenu('再次右键弹出菜单（复位字号）')
     await cdp.evaluate(`window.__e2eUI.clickByText('.ctx-menu-item', '复位字号')`)
     await waitForCondition(
       cdp,
-      `window.localStorage.getItem('ssh-client:font-size') === '14' && !document.querySelector('.ctx-menu')`,
+      `window.localStorage.getItem('easyssh:font-size') === '14' && !document.querySelector('.ctx-menu')`,
       '点「复位字号」后字号回到默认值 14，且菜单收起'
     )
     await openTerminalMenu('再次右键弹出菜单（缩小字号）')
@@ -2705,7 +2816,7 @@ async function main() {
     )
     await waitForCondition(
       cdp,
-      `window.localStorage.getItem('ssh-client:font-size') === '13' && !document.querySelector('.ctx-menu')`,
+      `window.localStorage.getItem('easyssh:font-size') === '13' && !document.querySelector('.ctx-menu')`,
       '点「缩小字号」后字号变为 13，且菜单收起'
     )
     // 右键菜单触发的缩放与快捷键 / 滚轮共用同一条 HUD 提示链路
@@ -2722,7 +2833,7 @@ async function main() {
     await cdp.dispatchKey({ key: '=', code: 'Equal', windowsVirtualKeyCode: 187, modifiers: 2 })
     await waitForCondition(
       cdp,
-      `window.localStorage.getItem('ssh-client:font-size') === '14'`,
+      `window.localStorage.getItem('easyssh:font-size') === '14'`,
       'Ctrl+= 仍能把字号从 13 放大到 14（Ctrl+= 未被默认菜单抢走）'
     )
     const dprAfterShortcut = await cdp.evaluate(`window.devicePixelRatio`)
@@ -2733,7 +2844,7 @@ async function main() {
     await cdp.dispatchKey({ key: '0', code: 'Digit0', windowsVirtualKeyCode: 48, modifiers: 2 })
     await waitForCondition(
       cdp,
-      `window.localStorage.getItem('ssh-client:font-size') === '14' &&
+      `window.localStorage.getItem('easyssh:font-size') === '14' &&
        document.querySelector('.terminal-host:not(.hidden) .term-hud')?.textContent === '字号已复位'`,
       'Ctrl+0 复位并弹出「字号已复位」提示（快捷键链路完好）'
     )
@@ -2897,7 +3008,7 @@ async function main() {
     await reloadAndRemount('重新加载后应用重新挂载（会话恢复场景）')
     await waitForCondition(
       cdp,
-      `document.documentElement.dataset.theme === 'dark' && window.localStorage.getItem('ssh-client:theme') === 'dark'`,
+      `document.documentElement.dataset.theme === 'dark' && window.localStorage.getItem('easyssh:theme') === 'dark'`,
       '重新加载后主题仍按持久化值生效（localStorage 持久化）'
     )
     // 12.14 把侧栏停在 332px 并写入 localStorage，重新加载后应当按持久化值恢复
