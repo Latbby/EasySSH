@@ -44,7 +44,7 @@
  *   13-light-sftp.png    浅色主题下的 SFTP 面板
  *   14-groups.png        侧栏分组：未分组 + 4 个分组，其中「生产环境」折叠
  *   16-restore.png       会话恢复提示条（预置 session 快照后重载页面触发）
- *   17-hidpi.png         --dpr=2 的终端态（含 1px 描边与文字清晰度断言）
+ *   17-hidpi.png         --dpr=2 的终端态（含侧栏/工作区分隔带与 1px 竖线的设备像素断言）
  *   18-bigdir.png        2000 行目录：虚拟滚动、表头固定、行高一致、滚动可定位
  *   19-light-dialog.png  浅色主题下的新建连接表单
  *
@@ -3809,7 +3809,7 @@ const CHECKS = [
   {
     id: '17',
     file: '17-hidpi.png',
-    state: '--dpr=2 的终端态：2 倍像素密度下 1px 描边与文字的比例一致性',
+    state: '--dpr=2 的终端态：2 倍像素密度下分隔带 / 1px 竖线与文字的比例一致性',
     viewport: 'default',
     // 单步覆盖 dpr：整轮以 1 倍跑，只有这一张按 2 倍出图
     dpr: 2,
@@ -3852,20 +3852,35 @@ const CHECKS = [
         `[信息] 17-hidpi 终端几何：${metrics.colCount} 列 x ${metrics.rowCount} 行，` +
           `单元格 ${metrics.cellWidth.toFixed(3)}x${metrics.rowHeight.toFixed(3)} CSS px（dpr=${metrics.dpr}）`
       )
-      // 记录侧栏边界所在的列，供截图后量 1px 描边在设备像素中的厚度
+      // 记录侧栏边界与拖拽手柄列，供截图后量「分隔带宽度」与「1px 竖线在设备像素中的厚度」
       const sidebar = JSON.parse(
         await ctx.cdp.evaluate(`JSON.stringify(window.__uiShot.rect('.sidebar'))`)
       )
-      ctx.hidpiRects = { sidebar, terminal: ctx.lightTerminalRect }
+      const splitter = JSON.parse(
+        await ctx.cdp.evaluate(`JSON.stringify((() => {
+          const el = document.querySelector('.splitter')
+          const rect = el.getBoundingClientRect()
+          const line = getComputedStyle(el, '::before')
+          return {
+            ...window.__uiShot.rect('.splitter'),
+            lineWidth: line.width,
+            lineColor: line.backgroundColor
+          }
+        })())`)
+      )
+      ctx.hidpiRects = { sidebar, splitter, terminal: ctx.lightTerminalRect }
       await sleep(500)
     },
     /**
-     * 像素级复查：整图必须是 2 倍图，且 1px 的侧栏描边在设备像素下正好 2 像素（无错位、无半像素漏色）。
+     * 像素级复查：整图必须是 2 倍图；
+     * 侧栏与工作区之间是 6px 拖拽手柄列（本轮新增）+ 其中居中的 1px 分隔竖线，
+     * 因此分别断言「分隔带正好 6 CSS px = 12 设备像素且紧贴侧栏右边界」与
+     * 「1px 竖线正好占 2 设备像素且居中」（无错位、无半像素漏色）。
      * @param {object} ctx 截图上下文
      * @param {object} shot 截图信息
-     * @returns {void}
+     * @returns {Promise<void>}
      */
-    verify(ctx, shot) {
+    async verify(ctx, shot) {
       const expectedWidth = Math.round(DEFAULT_VIEWPORT.width * shot.dpr)
       const expectedHeight = Math.round(DEFAULT_VIEWPORT.height * shot.dpr)
       if (shot.width !== expectedWidth || shot.height !== expectedHeight) {
@@ -3874,16 +3889,86 @@ const CHECKS = [
         )
       }
       const img = decodePng(fs.readFileSync(shot.filePath))
-      const sidebarRight = ctx.hidpiRects?.sidebar?.right ?? 272
-      const { chosen: border, attempts } = measureSidebarBorder(img, sidebarRight, shot.dpr)
-      console.log(
-        `[信息] 17-hidpi 侧栏描边：设备像素厚度=${border.thickness}（${border.color ? toHex(border.color) : '未检出'}），` +
-          `左侧底色 ${toHex(border.before)}，右侧底色 ${toHex(border.after)}，扫描 y=${border.y}，命中段 ${JSON.stringify(border.runs)}`
+      // 侧栏右边界跟随运行时宽度：默认值已从 272 调大到 300，且用户可拖动，
+      // 这里再退一步直接读 --sidebar-width，避免任何写死的旧宽度
+      const cssSidebarWidth = await ctx.cdp.evaluate(
+        `parseFloat(getComputedStyle(document.querySelector('.app')).getPropertyValue('--sidebar-width'))`
       )
-      if (border.thickness !== 2) {
+      const sidebarRight = ctx.hidpiRects?.sidebar?.right ?? cssSidebarWidth
+      const splitterRect = ctx.hidpiRects?.splitter
+      if (!splitterRect) throw new Error('17-hidpi 未记录拖拽手柄列现场，无法复核分隔带')
+      console.log(
+        `[信息] 17-hidpi 侧栏宽度现场：CSS 变量 ${cssSidebarWidth}px，实测右边界 ${sidebarRight}px，` +
+          `手柄列 ${splitterRect.width}px（${splitterRect.lineWidth} 的 ${splitterRect.lineColor} 竖线）`
+      )
+
+      // 1) 分隔带：从侧栏右边界开始、宽度等于手柄列宽的连续像素都不属于两侧底色
+      const bandWidth = Math.round(splitterRect.width * shot.dpr)
+      const { chosen: band, attempts } = measureSidebarBorder(img, sidebarRight, shot.dpr)
+      console.log(
+        `[信息] 17-hidpi 分隔带：设备像素宽度=${band.thickness}（${band.color ? toHex(band.color) : '未检出'}），` +
+          `左侧底色 ${toHex(band.before)}，右侧底色 ${toHex(band.after)}，扫描 y=${band.y}，命中段 ${JSON.stringify(band.runs)}`
+      )
+      if (band.thickness !== bandWidth) {
         throw new Error(
-          `1px 描边在 2 倍图下应为 2 设备像素，实际 ${border.thickness}` +
-            `（尝试：${attempts.map((item) => `y=${item.y}:${item.thickness}`).join('，')}；命中段 ${JSON.stringify(border.runs)}）`
+          `拖拽手柄列在 2 倍图下应为 ${bandWidth} 设备像素（${splitterRect.width} CSS px），实际 ${band.thickness}` +
+            `（尝试：${attempts.map((item) => `y=${item.y}:${item.thickness}`).join('，')}；命中段 ${JSON.stringify(band.runs)}）`
+        )
+      }
+      // 扫描起点固定在侧栏右边界前 8 设备像素，命中段偏移必须是 8，否则说明分隔带与侧栏错位
+      const bandStart = band.runs.length ? band.runs[0].start : null
+      if (bandStart !== 8) {
+        throw new Error(
+          `分隔带未紧贴侧栏右边界：命中段从扫描起点偏移 ${bandStart} 开始，期望 8` +
+            `（命中段 ${JSON.stringify(band.runs)}）`
+        )
+      }
+
+      // 2) 手柄列里居中的 1px 竖线：按覆盖率加权量厚度，dpr=2 时应当正好是 2 个设备像素
+      const lineAttempts = []
+      const columnStart = Math.round(splitterRect.left * shot.dpr)
+      const columnLength = Math.round(splitterRect.width * shot.dpr)
+      const lineColor = parseColorText(splitterRect.lineColor)
+      if (!lineColor) throw new Error(`无法解析分隔竖线颜色：${splitterRect.lineColor}`)
+      for (const ratio of [0.35, 0.6, 0.85]) {
+        const y = Math.round(img.height * ratio)
+        const strip = []
+        for (let index = 0; index < columnLength; index += 1) {
+          const color = pixelAt(img, columnStart + index, y)
+          if (!color) break
+          strip.push(toHex(color))
+        }
+        // 竖线两侧的底色取该列首尾像素（竖线居中，两端一定在列内底色上）
+        const before = parseColorText(strip[1]) ?? parseColorText(strip[0])
+        const after = parseColorText(strip[strip.length - 2]) ?? parseColorText(strip[strip.length - 1])
+        const measured = borderCoverage(strip, lineColor, before, after)
+        lineAttempts.push({ ratio, y, strip, before, after, ...measured })
+      }
+      const line = lineAttempts
+        .slice()
+        .sort(
+          (a, b) =>
+            Math.abs(a.coverage - shot.dpr) - Math.abs(b.coverage - shot.dpr) ||
+            a.coverage - b.coverage
+        )[0]
+      console.log(
+        `[信息] 17-hidpi 分隔竖线：覆盖率=${line.coverage}（期望 ${shot.dpr}），` +
+          `起始设备像素偏移=${line.firstCoveredIndex}（期望 ${Math.round((columnLength - shot.dpr) / 2)}），` +
+          `逐像素覆盖 ${JSON.stringify(line.perPixel)}，扫描 y=${line.y}`
+      )
+      if (Math.abs(line.coverage - shot.dpr) > 0.3) {
+        throw new Error(
+          `1px 分隔竖线在 ${shot.dpr} 倍图下的覆盖率应为 ${shot.dpr}，实际 ${line.coverage}` +
+            `（逐像素覆盖 ${JSON.stringify(line.perPixel)}；尝试 ${lineAttempts
+              .map((item) => `y=${item.y}:${item.coverage}`)
+              .join('，')}）`
+        )
+      }
+      const expectedFirst = Math.round((columnLength - shot.dpr) / 2)
+      if (line.firstCoveredIndex !== expectedFirst) {
+        throw new Error(
+          `分隔竖线未居中：首个被覆盖的设备像素偏移 ${line.firstCoveredIndex}，期望 ${expectedFirst}` +
+            `（手柄列 ${columnLength} 设备像素，逐像素覆盖 ${JSON.stringify(line.perPixel)}）`
         )
       }
     }

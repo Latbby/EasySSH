@@ -19,6 +19,13 @@
  *      三项功能的入口与接口在打包产物中确实不存在、
  *      编辑连接回显已保存凭据（含「小眼睛」明文切换与「不改动保存不误清」）、
  *      弹窗遮罩只在按下与松开都落在遮罩本身时才关闭（ConnectionForm / HostKeyDialog / 移动到分组）
+ *  13. 本轮（task-24）四项使用反馈的独立验证（见 12.13~12.16）：
+ *      SFTP 单击目录即进入 / 单击文件只选中（服务端 OPENDIR 计数证明只列一次目录）、
+ *      侧栏可拖动分配宽度（最小 240 / 最大 min(560, 窗口宽-480) 钳制、localStorage 持久化、
+ *      双击与 Home 复位、方向键微调、窄视口收拢、重新加载后按持久化值恢复）、
+ *      终端 Ctrl+滚轮缩放（.term-hud 出现并约 1s 后消失、devicePixelRatio 不变证明没有整页缩放、
+ *      右键菜单「放大/缩小/复位字号」三项可用、Ctrl+= 与 Ctrl+0 仍生效）、
+ *      复制连接把手动保存的密码一并带给副本（保存后 hasCredential 为真且再次打开仍是原值）
  *
  * 注意：脚本优先使用 dist/win-unpacked 下的打包产物，若该产物早于本轮源码改动，
  * 新增用例会因为跑的是旧代码而失败；验证新代码前请先把 dist 目录改名让脚本回退到 out/ 开发态。
@@ -135,6 +142,20 @@ for (let index = 0; index < MANY_FILES; index += 1) {
     content: Buffer.from(`file ${index}`)
   })
 }
+// 单击进入目录用例：一个只有一项的小目录，避免与 2000 行虚拟滚动用例互相干扰
+memfs.set(`${FAKE_HOME}/e2e-dir`, { type: 'dir' })
+memfs.set(`${FAKE_HOME}/e2e-dir/inside.txt`, { type: 'file', content: Buffer.from('inside dir') })
+// 第二个小目录与它的子目录：用于取证 500ms 防误触窗口对「换一个目录再点」的影响
+memfs.set(`${FAKE_HOME}/e2e-dir2`, { type: 'dir' })
+memfs.set(`${FAKE_HOME}/e2e-dir2/sub`, { type: 'dir' })
+memfs.set(`${FAKE_HOME}/e2e-dir2/sub/deep.txt`, { type: 'file', content: Buffer.from('deep') })
+
+/**
+ * SFTP 服务端请求计数。
+ * 「一次单击只列一次目录」「单击文件不会走下载路径」这类断言必须在协议层取证：
+ * 渲染进程内部实现（例如 load 是否重复调用）随时可能变，服务端收到的请求才是用户可感知的事实。
+ */
+const sftpStats = { opendir: 0, open: 0 }
 
 /**
  * 规范化远程路径。
@@ -240,6 +261,8 @@ function serveSftp(sftp) {
   })
 
   sftp.on('OPENDIR', (reqid, target) => {
+    // 计数点在真实协议处理器里：面板每次列目录必然产生一次 OPENDIR
+    sftpStats.opendir += 1
     const node = memfs.get(normalizePath(target))
     if (!node) return sftp.status(reqid, SFTP_STATUS.NO_SUCH_FILE)
     if (node.type !== 'dir') return sftp.status(reqid, SFTP_STATUS.FAILURE)
@@ -265,6 +288,8 @@ function serveSftp(sftp) {
   })
 
   sftp.on('OPEN', (reqid, filename, flags) => {
+    // 下载 / 远程编辑都要先 OPEN 远端文件，用它佐证「单击文件没有触发下载」
+    sftpStats.open += 1
     const target = normalizePath(filename)
     const canWrite = (flags & 0x02) !== 0
     let node = memfs.get(target)
@@ -550,6 +575,65 @@ async function connectCdp(wsUrl) {
       }
       await send('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' })
       await send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' })
+    },
+    /**
+     * 发送一条任意 CDP 命令（Input / Emulation 等域）。
+     * @param {string} method 方法名
+     * @param {Record<string, unknown>} params 参数
+     * @returns {Promise<any>}
+     */
+    sendCommand(method, params = {}) {
+      return send(method, params)
+    },
+    /**
+     * 注入一条真实鼠标事件。
+     * 与页面内合成 MouseEvent 的区别：真实输入管线会同时产生 pointerdown/pointermove/pointerup，
+     * 具备真实 pointerId，因此 setPointerCapture 之类的实现才能被如实测到。
+     * @param {string} type 事件类型，如 mousePressed / mouseMoved / mouseReleased / mouseWheel
+     * @param {Record<string, unknown>} params 其余参数（x / y / button / buttons / clickCount 等）
+     * @returns {Promise<void>}
+     */
+    async dispatchMouse(type, params = {}) {
+      await send('Input.dispatchMouseEvent', { type, ...params })
+    },
+    /**
+     * 派发一次 Ctrl+滚轮（modifiers=2 即 Ctrl），用于终端字号缩放用例。
+     * @param {{x: number, y: number, deltaY: number}} options 光标位置与滚动量（向上滚为负）
+     * @returns {Promise<void>}
+     */
+    async dispatchCtrlWheel({ x, y, deltaY }) {
+      await send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x,
+        y,
+        deltaX: 0,
+        deltaY,
+        modifiers: 2
+      })
+    },
+    /**
+     * 覆盖视口尺寸（用于窄窗口收拢用例）。
+     * deviceScaleFactor 传当前真实值：既完成视口覆盖，又不改变 devicePixelRatio，
+     * 否则后面的「Ctrl+滚轮不得触发整页缩放」断言会被这次覆盖干扰。
+     * @param {number} width 视口宽
+     * @param {number} height 视口高
+     * @param {number} deviceScaleFactor 设备像素比
+     * @returns {Promise<void>}
+     */
+    async setViewport(width, height, deviceScaleFactor) {
+      await send('Emulation.setDeviceMetricsOverride', {
+        width,
+        height,
+        deviceScaleFactor,
+        mobile: false
+      })
+    },
+    /**
+     * 取消视口覆盖，恢复真实窗口尺寸。
+     * @returns {Promise<void>}
+     */
+    async clearViewport() {
+      await send('Emulation.clearDeviceMetricsOverride')
     },
     close: () => socket.close()
   }
@@ -1470,10 +1554,17 @@ async function main() {
     const menuText = await cdp.evaluate(
       `Array.from(document.querySelectorAll('.ctx-menu-item')).map((el) => el.textContent).join('|')`
     )
-    if (!menuText.includes('复制') || !menuText.includes('查找') || !menuText.includes('清屏')) {
+    if (
+      !menuText.includes('复制') ||
+      !menuText.includes('查找') ||
+      !menuText.includes('清屏') ||
+      !menuText.includes('放大字号') ||
+      !menuText.includes('缩小字号') ||
+      !menuText.includes('复位字号')
+    ) {
       throw new Error(`右键菜单项不完整：${menuText}`)
     }
-    pass(`右键菜单项完整（${menuText}）`)
+    pass(`右键菜单项完整（含放大 / 缩小 / 复位字号）：${menuText}`)
     await cdp.evaluate(
       `(document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true)`
     )
@@ -1881,6 +1972,773 @@ async function main() {
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
+    // 12.13 SFTP 单击进入目录：目录单击即进入（且只列一次目录），文件单击只选中不导航
+    //      「单击文件未触发下载」的取证限制：下载会先弹原生保存框（主进程 dialog.showSaveDialog），
+    //      e2e 里既无法判断框是否弹出、也无法点掉它，因此以「路径未变 + 行进入选中态 +
+    //      服务端未收到 OPEN 文件请求」作为判据；真正会弹框的路径（双击文件）不在自动化里触发。
+    // -----------------------------------------------------------------------
+
+    /**
+     * 让可见 SFTP 面板跳转到指定目录，并等到该目录的内容渲染出来。
+     * 同时用于把「上一次点击留下的选中态与目录」重置到已知状态。
+     * 结尾会等过产品里的 500ms 防误触窗口：路径栏回车同样会刷新 lastLoadAt，
+     * 若紧接着就合成单击，会被当成「双击的第二下」而被忽略（这是产品设计，不是缺陷）。
+     * @param {string} dir 目标绝对路径
+     * @param {string} expectText 目录内容里应当出现的一段文本
+     * @returns {Promise<void>}
+     */
+    const gotoRemoteDir = async (dir, expectText) => {
+      await cdp.evaluate(
+        `window.__e2eUI.setUncontrolledValue('.sftp-panel:not(.hidden) .sftp-path-input', ${JSON.stringify(dir)})`
+      )
+      await cdp.evaluate(`window.__e2eUI.pressEnter('.sftp-panel:not(.hidden) .sftp-path-input')`)
+      await waitForCondition(
+        cdp,
+        `document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value === ${JSON.stringify(dir)}` +
+          ` && (document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes(${JSON.stringify(expectText)})`,
+        `SFTP 面板停在 ${dir} 并列出 ${expectText}`
+      )
+      // 等过 500ms 防误触窗口，模拟真实用户的点击间隔
+      await sleep(650)
+    }
+
+    await gotoRemoteDir(FAKE_HOME, 'e2e-dir')
+    const sftpRowsReady = JSON.parse(
+      await cdp.evaluate(`JSON.stringify({
+        目录行: !!document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/e2e-dir"]'),
+        文件行: !!document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/readme.txt"]')
+      })`)
+    )
+    assert(
+      sftpRowsReady.目录行 && sftpRowsReady.文件行,
+      `目录行与文件行都在列表里（${JSON.stringify(sftpRowsReady)}）`
+    )
+
+    // 单击目录行：服务端 OPENDIR 计数证明「一次单击只列一次目录」
+    const opendirBeforeDirClick = sftpStats.opendir
+    const dirClick = JSON.parse(
+      await cdp.evaluate(`(async () => {
+        const row = document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/e2e-dir"]')
+        if (!row) throw new Error('目录行不存在')
+        const title = row.querySelector('.sftp-name')?.getAttribute('title') ?? ''
+        const timeline = []
+        const sample = (label) => timeline.push({
+          label,
+          inDom: row.isConnected,
+          selected: row.classList.contains('selected')
+        })
+        row.click()
+        sample('click 返回时')
+        // React 对离散事件的刷新时机可能是微任务也可能是宏任务，而「选中」在导航完成后会被重置，
+        // 因此用一个很短的采样时间线捕捉：只要在行被新目录内容替换前观察到选中态即可
+        for (const delay of [1, 2, 4, 8, 16, 32]) {
+          await new Promise((resolve) => setTimeout(resolve, delay))
+          sample('+' + delay + 'ms')
+          if (timeline.some((item) => item.selected) || !row.isConnected) break
+        }
+        return JSON.stringify({ title, timeline })
+      })()`)
+    )
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value === '${FAKE_HOME}/e2e-dir'`,
+      '单击目录行后路径栏进入该目录'
+    )
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes('inside.txt')`,
+      '目录内容加载完成（列表出现 inside.txt）'
+    )
+    const opendirAfterDirClick = sftpStats.opendir
+    const selectedObserved = dirClick.timeline.some((item) => item.selected)
+    assert(
+      selectedObserved,
+      `单击目录行时该行先进入选中态（采样时间线 ${JSON.stringify(dirClick.timeline)}）`
+    )
+    assert(
+      dirClick.title === `单击进入 e2e-dir`,
+      `目录行的 title 提示「单击进入」（实际「${dirClick.title}」）`
+    )
+    assert(
+      opendirAfterDirClick - opendirBeforeDirClick === 1,
+      `单击目录只触发一次列目录请求（服务端 OPENDIR 计数 ${opendirBeforeDirClick} → ${opendirAfterDirClick}）`
+    )
+
+    // 双击目录不得进两层：真实双击的第二次 click 带 detail=2，实现据此忽略第二下
+    await gotoRemoteDir(FAKE_HOME, 'readme.txt')
+    const opendirBeforeDoubleClick = sftpStats.opendir
+    await cdp.evaluate(`(() => {
+      const row = document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/e2e-dir"]')
+      if (!row) throw new Error('目录行不存在')
+      const options = { bubbles: true, cancelable: true }
+      // 真实双击的浏览器事件序列：click(detail=1) → click(detail=2) → dblclick(detail=2)。
+      // detail 必须显式给出：合成事件默认是 0，而实现正是靠 detail>1 忽略第二下
+      row.dispatchEvent(new MouseEvent('click', { ...options, detail: 1 }))
+      row.dispatchEvent(new MouseEvent('click', { ...options, detail: 2 }))
+      row.dispatchEvent(new MouseEvent('dblclick', { ...options, detail: 2 }))
+      return true
+    })()`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value === '${FAKE_HOME}/e2e-dir'`,
+      '双击目录（第二下 detail=2）也只进入一层'
+    )
+    assert(
+      sftpStats.opendir - opendirBeforeDoubleClick === 1,
+      `双击目录只产生一次列目录请求（服务端 OPENDIR 计数 ${opendirBeforeDoubleClick} → ${sftpStats.opendir}，第二下被 detail 判定忽略）`
+    )
+
+    // 返回上级后立刻再进同一个目录也必须生效：旧实现用「最近一次加载时刻 + 500ms 窗口」
+    // 防误触，会把这一下吞掉，用户连点两个目录时第一下看起来没反应
+    await cdp.evaluate(`(() => {
+      const btn = Array.from(document.querySelectorAll('.sftp-panel:not(.hidden) .icon-btn'))
+        .find((item) => item.getAttribute('title') === '上一级')
+      if (!btn) throw new Error('上一级按钮不存在')
+      btn.click()
+      return true
+    })()`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value === '${FAKE_HOME}'`,
+      '返回上级目录成功'
+    )
+    const opendirBeforeQuickSecondClick = sftpStats.opendir
+    await cdp.evaluate(`(() => {
+      const row = document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/e2e-dir"]')
+      if (!row) throw new Error('目录行不存在')
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+      return true
+    })()`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value === '${FAKE_HOME}/e2e-dir'`,
+      '返回上级后紧接着单击目录仍能进入（不被防误触逻辑吞掉）'
+    )
+    assert(
+      sftpStats.opendir - opendirBeforeQuickSecondClick === 1,
+      `紧接着的第二次目录单击仍只列目录一次（OPENDIR ${opendirBeforeQuickSecondClick} → ${sftpStats.opendir}）`
+    )
+
+    // 观察（只取证、不判定）：500ms 防误触窗口的基准是「最近一次目录加载时刻」，而不是
+    // 「刚被点进的那一行」。因此用户在 500ms 内换一个目录再点，这一次点击也会被吞掉。
+    await gotoRemoteDir(FAKE_HOME, 'e2e-dir2')
+    const opendirBeforeFastSecond = sftpStats.opendir
+    await cdp.evaluate(
+      `document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/e2e-dir2"]').click()`
+    )
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value === '${FAKE_HOME}/e2e-dir2'` +
+        ` && (document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes('sub')`,
+      '单击 e2e-dir2 进入该目录（用于观察防误触窗口）'
+    )
+    const opendirAfterEnterDir2 = sftpStats.opendir
+    // 紧接着（远小于 500ms）点击里面的另一个目录 sub
+    await cdp.evaluate(
+      `document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/e2e-dir2/sub"]').click()`
+    )
+    await sleep(400)
+    const fastSecondPath = await cdp.evaluate(
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value ?? null`
+    )
+    const fastSecondSwallowed =
+      fastSecondPath === `${FAKE_HOME}/e2e-dir2` && sftpStats.opendir === opendirAfterEnterDir2
+    console.log(
+      `[观察] 500ms 防误触窗口内点击另一个目录：${
+        fastSecondSwallowed ? '被吞掉（需再点一次）' : '未被吞掉'
+      }，路径=${fastSecondPath}，OPENDIR ${opendirAfterEnterDir2} → ${sftpStats.opendir}`
+    )
+    // 过了窗口再点一次必须正常进入，证明只是延迟生效而不是点击失效
+    // （若第二次点击并未被吞掉，此时已经在 sub 目录里，行不存在即无需再点）
+    await sleep(300)
+    await cdp.evaluate(`(() => {
+      const row = document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/e2e-dir2/sub"]')
+      if (row) row.click()
+      return !!row
+    })()`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value === '${FAKE_HOME}/e2e-dir2/sub'` +
+        ` && (document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes('deep.txt')`,
+      '过防误触窗口后再点同一目录可正常进入（点击未失效）'
+    )
+
+    // 单击文件：只选中，不改变路径，也不走下载（不产生 OPEN）
+    await gotoRemoteDir(FAKE_HOME, 'readme.txt')
+    const opendirBeforeFileClick = sftpStats.opendir
+    const openBeforeFileClick = sftpStats.open
+    const fileClick = JSON.parse(
+      await cdp.evaluate(`(async () => {
+        const row = document.querySelector('.sftp-panel:not(.hidden) [data-path="${FAKE_HOME}/readme.txt"]')
+        if (!row) throw new Error('文件行不存在')
+        row.click()
+        // 留出足够时间：若单击真的会触发下载，这里就会等到原生保存框或至少一次 OPEN
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        return JSON.stringify({
+          path: document.querySelector('.sftp-panel:not(.hidden) .sftp-path-input')?.value ?? null,
+          selected: row.classList.contains('selected')
+        })
+      })()`)
+    )
+    assert(
+      fileClick.path === FAKE_HOME,
+      `单击文件后路径不变，仍停留在 ${FAKE_HOME}（实际 ${fileClick.path}，下载路径未被触发）`
+    )
+    assert(fileClick.selected === true, '单击文件后该行进入选中态（文件单击只选中）')
+    assert(
+      sftpStats.opendir === opendirBeforeFileClick && sftpStats.open === openBeforeFileClick,
+      `单击文件未触发列目录也未打开文件（OPENDIR ${opendirBeforeFileClick}→${sftpStats.opendir}，OPEN ${openBeforeFileClick}→${sftpStats.open}）`
+    )
+
+    // -----------------------------------------------------------------------
+    // 12.14 侧栏宽度：拖动分配、最小 / 最大钳制、localStorage 持久化、双击与 Home 复位、
+    //       方向键微调、窄视口收拢（用 CDP 真实鼠标事件，pointerId 真实，setPointerCapture 才会生效）
+    // -----------------------------------------------------------------------
+    /** 侧栏宽度 CSS 变量的读取表达式，供多处断言复用 */
+    const sidebarCssWidth = `getComputedStyle(document.querySelector('.app')).getPropertyValue('--sidebar-width').trim()`
+
+    /**
+     * 读取侧栏宽度现场（CSS 变量 / 实际像素宽 / localStorage / 窗口宽与上限 / 分隔条可访问性）。
+     * @returns {Promise<object>} 现场快照
+     */
+    const readSidebarState = async () =>
+      JSON.parse(
+        await cdp.evaluate(`JSON.stringify((() => {
+          const app = document.querySelector('.app')
+          const sidebar = document.querySelector('.sidebar')
+          const splitter = document.querySelector('.splitter')
+          return {
+            cssVar: app ? getComputedStyle(app).getPropertyValue('--sidebar-width').trim() : null,
+            sidebarWidth: sidebar ? Math.round(sidebar.getBoundingClientRect().width) : null,
+            stored: window.localStorage.getItem('ssh-client:sidebar-width'),
+            innerWidth: window.innerWidth,
+            maxAllowed: Math.max(240, Math.min(560, window.innerWidth - 486)),
+            dragging: !!splitter && splitter.classList.contains('dragging'),
+            bodyResizing: document.body.classList.contains('resizing'),
+            ariaNow: splitter ? splitter.getAttribute('aria-valuenow') : null,
+            role: splitter ? splitter.getAttribute('role') : null,
+            ariaLabel: splitter ? splitter.getAttribute('aria-label') : null,
+            tabIndex: splitter ? splitter.tabIndex : null
+          }
+        })())`)
+      )
+
+    /**
+     * 分隔条当前的屏幕坐标（其 x 随侧栏宽度移动，每次拖动前都要重新取）。
+     * @returns {Promise<{x: number, y: number}>} 视口坐标
+     */
+    const splitterPointNow = async () =>
+      JSON.parse(
+        await cdp.evaluate(`JSON.stringify((() => {
+          const rect = document.querySelector('.splitter').getBoundingClientRect()
+          return {
+            x: Math.round(rect.left + rect.width / 2),
+            y: Math.round(rect.top + rect.height / 2)
+          }
+        })())`)
+      )
+
+    /**
+     * 用真实鼠标事件把分隔条拖到 targetX（等价用户按住分隔条拖动）。
+     * @param {number} targetX 目标 x（视口坐标；侧栏贴着窗口左边，x 即目标宽度）
+     * @param {{expectDragClass?: boolean}} [options] 是否把「进入拖动态」也记为一条断言
+     * @returns {Promise<{during: object, expectedDuring: number}>} 松手前的现场与期望宽度
+     */
+    const dragSplitterTo = async (targetX, options = {}) => {
+      const from = await splitterPointNow()
+      await cdp.dispatchMouse('mousePressed', {
+        x: from.x,
+        y: from.y,
+        button: 'left',
+        buttons: 1,
+        clickCount: 1
+      })
+      const dragStarted = await waitFor(
+        cdp,
+        `document.querySelector('.splitter').classList.contains('dragging') &&
+         document.body.classList.contains('resizing')`,
+        3000
+      )
+      if (options.expectDragClass) {
+        assert(dragStarted === true, '按住分隔条后进入拖动态（.splitter.dragging 与 body.resizing 同步）')
+      }
+      // 分两次移动，避免一次瞬移掩盖 pointermove 的连续性
+      await cdp.dispatchMouse('mouseMoved', {
+        x: Math.round((from.x + targetX) / 2),
+        y: from.y,
+        button: 'left',
+        buttons: 1
+      })
+      await cdp.dispatchMouse('mouseMoved', {
+        x: targetX,
+        y: from.y,
+        button: 'left',
+        buttons: 1
+      })
+      const moved = await readSidebarState()
+      const expectedDuring = Math.min(Math.max(Math.round(targetX), 240), moved.maxAllowed)
+      await waitFor(cdp, `${sidebarCssWidth} === '${expectedDuring}px'`, 2000)
+      const during = await readSidebarState()
+      await cdp.dispatchMouse('mouseReleased', {
+        x: targetX,
+        y: from.y,
+        button: 'left',
+        buttons: 0,
+        clickCount: 1
+      })
+      await waitFor(cdp, `!document.querySelector('.splitter').classList.contains('dragging')`, 3000)
+      return { during, expectedDuring }
+    }
+
+    const sidebarInitial = await readSidebarState()
+    assert(
+      sidebarInitial.cssVar === '300px' && sidebarInitial.sidebarWidth === 300,
+      `侧栏默认宽度为 300px（CSS 变量 ${sidebarInitial.cssVar}，实测 ${sidebarInitial.sidebarWidth}px；本轮由 272 调大）`
+    )
+    assert(
+      sidebarInitial.stored === null,
+      `首次启动没有残留的 localStorage 宽度（stored=${JSON.stringify(sidebarInitial.stored)}，默认值来自代码）`
+    )
+    assert(
+      sidebarInitial.role === 'separator' &&
+        sidebarInitial.ariaLabel === '调整侧栏宽度' &&
+        sidebarInitial.tabIndex === 0,
+      `分隔条是可聚焦的分隔符（role=${sidebarInitial.role}，aria-label=${sidebarInitial.ariaLabel}，tabIndex=${sidebarInitial.tabIndex}）`
+    )
+
+    // 拖动到 360：拖动中实时跟随，松手才落盘
+    const firstDrag = await dragSplitterTo(360, { expectDragClass: true })
+    assert(
+      firstDrag.during.cssVar === '360px' && firstDrag.during.stored === null,
+      `拖动过程中宽度实时跟随到 ${firstDrag.during.cssVar}，此时尚未落盘（stored=${JSON.stringify(firstDrag.during.stored)}）`
+    )
+    const afterFirstDrag = await readSidebarState()
+    assert(
+      afterFirstDrag.sidebarWidth === 360 && afterFirstDrag.ariaNow === '360',
+      `松手后侧栏实际宽度为 360px（实测 ${afterFirstDrag.sidebarWidth}px，aria-valuenow=${afterFirstDrag.ariaNow}）`
+    )
+    assert(
+      afterFirstDrag.stored === '360',
+      `松手后宽度写入 localStorage（stored=${afterFirstDrag.stored}）`
+    )
+
+    // 钳制：拖到极小 → 240，拖到极大 → min(560, 窗口宽-486)（486 = 480 工作区保底 + 6 分隔条）
+    await dragSplitterTo(100)
+    const clampedMin = await readSidebarState()
+    assert(
+      clampedMin.cssVar === '240px' && clampedMin.stored === '240',
+      `拖到极小被钳制在最小宽度 240px（实测 ${clampedMin.cssVar}，持久化 ${clampedMin.stored}）`
+    )
+    await dragSplitterTo(clampedMin.innerWidth - 2)
+    const clampedMax = await readSidebarState()
+    assert(
+      clampedMax.cssVar === `${clampedMax.maxAllowed}px` &&
+        clampedMax.stored === String(clampedMax.maxAllowed),
+      `拖到极大被钳制在 min(560, 窗口宽-486)=${clampedMax.maxAllowed}px（窗口宽 ${clampedMax.innerWidth}，实测 ${clampedMax.cssVar}）`
+    )
+
+    // 窄视口收拢：560 → min(560, 900-486) = 414
+    const dprBeforeNarrow = await cdp.evaluate(`window.devicePixelRatio`)
+    const wideInnerWidth = clampedMax.innerWidth
+    await cdp.setViewport(900, 680, dprBeforeNarrow)
+    await waitForCondition(
+      cdp,
+      `window.innerWidth === 900 && ${sidebarCssWidth} === '414px'`,
+      '窗口变窄到 900px 后侧栏从 560px 收拢到 414px（min(560, 900-486)）'
+    )
+    const narrowState = await readSidebarState()
+    assert(
+      narrowState.sidebarWidth === 414,
+      `窄视口下侧栏实际宽度为 414px（视口 ${narrowState.innerWidth}px，实测 ${narrowState.sidebarWidth}px）`
+    )
+    await cdp.clearViewport()
+    await waitForCondition(
+      cdp,
+      `window.innerWidth === ${wideInnerWidth}`,
+      `取消视口覆盖后窗口宽度恢复到 ${wideInnerWidth}px`
+    )
+    const restoredState = await readSidebarState()
+    assert(
+      restoredState.sidebarWidth === 414 && restoredState.sidebarWidth <= restoredState.maxAllowed,
+      `视口恢复后侧栏保持收拢结果 414px（不会自动弹回 560，当前上限 ${restoredState.maxAllowed}px）`
+    )
+
+    // 双击复位到 300
+    const resetPoint = await splitterPointNow()
+    const clickPair = async (clickCount) => {
+      await cdp.dispatchMouse('mousePressed', {
+        x: resetPoint.x,
+        y: resetPoint.y,
+        button: 'left',
+        buttons: 1,
+        clickCount
+      })
+      await cdp.dispatchMouse('mouseReleased', {
+        x: resetPoint.x,
+        y: resetPoint.y,
+        button: 'left',
+        buttons: 0,
+        clickCount
+      })
+    }
+    await clickPair(1)
+    await clickPair(2)
+    let doubleClickReset = await waitFor(cdp, `${sidebarCssWidth} === '300px'`, 2500)
+    if (!doubleClickReset) {
+      console.log('[信息] CDP 双击序列未触发 dblclick，退回页面内合成 dblclick 复核（断言的行为不变）')
+      await cdp.evaluate(`(() => {
+        document.querySelector('.splitter').dispatchEvent(
+          new MouseEvent('dblclick', { bubbles: true, cancelable: true })
+        )
+        return true
+      })()`)
+      doubleClickReset = await waitFor(cdp, `${sidebarCssWidth} === '300px'`, 2500)
+    }
+    if (!doubleClickReset) throw new Error('双击分隔条未能复位到默认宽度 300px')
+    pass('双击分隔条复位到默认宽度 300px')
+    const afterReset = await readSidebarState()
+    assert(
+      afterReset.stored === '300' && afterReset.sidebarWidth === 300,
+      `双击复位同时持久化（localStorage=${afterReset.stored}，实测 ${afterReset.sidebarWidth}px）`
+    )
+
+    // 方向键微调：ArrowRight +16、ArrowLeft -16、Home 复位
+    const splitterFocused = await cdp.evaluate(`(() => {
+      const splitter = document.querySelector('.splitter')
+      splitter.focus()
+      return document.activeElement === splitter
+    })()`)
+    if (!splitterFocused) throw new Error('分隔条无法获得焦点，无法验证键盘微调')
+    await cdp.dispatchKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 })
+    await waitForCondition(cdp, `${sidebarCssWidth} === '316px'`, 'ArrowRight 把侧栏加宽 16px 到 316px')
+    await cdp.dispatchKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 })
+    await waitForCondition(cdp, `${sidebarCssWidth} === '332px'`, '再按 ArrowRight 到 332px')
+    await cdp.dispatchKey({ key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 })
+    await waitForCondition(cdp, `${sidebarCssWidth} === '316px'`, 'ArrowLeft 把侧栏收窄 16px 回到 316px')
+    await cdp.dispatchKey({ key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 })
+    await waitForCondition(cdp, `${sidebarCssWidth} === '300px'`, 'Home 键复位到默认宽度 300px')
+
+    // 停在非默认宽度 332：15 节的页面重新加载用例会断言「宽度按 localStorage 恢复」
+    await cdp.dispatchKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 })
+    await waitForCondition(cdp, `${sidebarCssWidth} === '316px'`, '键盘微调后停在 316px')
+    await cdp.dispatchKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 })
+    await waitForCondition(cdp, `${sidebarCssWidth} === '332px'`, '键盘微调后停在 332px（供重新加载持久化断言）')
+    const finalSidebar = await readSidebarState()
+    assert(
+      finalSidebar.stored === '332' && finalSidebar.sidebarWidth === 332,
+      `侧栏宽度持久化为 332（localStorage=${finalSidebar.stored}，实测 ${finalSidebar.sidebarWidth}px）`
+    )
+
+    // -----------------------------------------------------------------------
+    // 12.15 复制连接带上已保存凭据：表单回显源连接密码 → 直接保存 → 副本 hasCredential 为真
+    //       → 落盘有密文 → 再次打开副本编辑表单密码仍是原值
+    //       （测试服务端接受任意认证，所以「副本能连上」不能证明凭据被复制，
+    //        必须用 getCredential 解密回读与密文落盘来取证）
+    // -----------------------------------------------------------------------
+    const sourceCredential = JSON.parse(
+      await cdp.evaluate(
+        `(async () => JSON.stringify(await window.api.connections.getCredential(${JSON.stringify(saved.id)})))()`
+      )
+    )
+    assert(
+      sourceCredential.password === 's3cret-pw',
+      `源连接「E2E 测试机」确实存有密码（getCredential 回读 password=${JSON.stringify(sourceCredential.password)}）`
+    )
+    await cdp.evaluate(`window.__e2eUI.clickConnectionAction('E2E 测试机', '复制连接')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '新建连接'`,
+      '点「复制连接」打开新建表单'
+    )
+    // 回显走异步 IPC（connections.getCredential），等密码框拿到值再断言
+    const copyPasswordEchoed = `(() => {
+      try {
+        return window.__e2eUI.fieldState('密码').value === 's3cret-pw'
+      } catch {
+        return false
+      }
+    })()`
+    await waitForCondition(
+      cdp,
+      copyPasswordEchoed,
+      '复制表单的密码框回显了源连接已保存的密码（value 为原值，不是占位符）'
+    )
+    const copyDraft = JSON.parse(
+      await cdp.evaluate(`(() => JSON.stringify({
+        名称: window.__e2eUI.fieldState('名称').value,
+        主机: window.__e2eUI.fieldState('主机').value,
+        端口: window.__e2eUI.fieldState('端口').value,
+        用户名: window.__e2eUI.fieldState('用户名').value,
+        密码类型: window.__e2eUI.fieldState('密码').type,
+        提示: (document.querySelector('.modal-note')?.textContent ?? '').replace(/\\s+/g, ' ').trim()
+      }))()`)
+    )
+    assert(
+      copyDraft.名称 === 'E2E 测试机 副本',
+      `复制草稿名称为「E2E 测试机 副本」（实际 ${copyDraft.名称}）`
+    )
+    assert(
+      copyDraft.主机 === '127.0.0.1' &&
+        copyDraft.端口 === String(SSH_PORT) &&
+        copyDraft.用户名 === 'tester',
+      `副本沿用源连接的主机 / 端口 / 用户名（${copyDraft.主机}:${copyDraft.端口}，${copyDraft.用户名}）`
+    )
+    assert(
+      copyDraft.密码类型 === 'password' &&
+        copyDraft.提示.includes('已从「E2E 测试机」') &&
+        copyDraft.提示.includes('副本'),
+      `表单提示明确告知凭据已从源连接带入（${copyDraft.提示}）`
+    )
+    await cdp.evaluate(`window.__e2eUI.click('.modal button[type="submit"]')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '保存副本后弹窗关闭')
+    await waitForCondition(
+      cdp,
+      `Array.from(document.querySelectorAll('.conn-name')).some((el) => el.textContent.trim() === 'E2E 测试机 副本')`,
+      '侧栏出现副本连接「E2E 测试机 副本」'
+    )
+    const copyVo = JSON.parse(
+      await cdp.evaluate(
+        `(async () => JSON.stringify((await window.api.connections.list()).find((vo) => vo.name === 'E2E 测试机 副本') ?? null))()`
+      )
+    )
+    if (!copyVo?.id) throw new Error('副本保存后未在连接列表中找到')
+    assert(
+      copyVo.id !== saved.id,
+      `副本是独立记录（副本 id=${copyVo.id.slice(0, 8)}… 与源 id=${saved.id.slice(0, 8)}… 不同）`
+    )
+    assert(
+      copyVo.hasCredential === true,
+      `副本 hasCredential 为真（connections.list 回读 hasCredential=${copyVo.hasCredential}）`
+    )
+    const copyCredential = JSON.parse(
+      await cdp.evaluate(
+        `(async () => JSON.stringify(await window.api.connections.getCredential(${JSON.stringify(copyVo.id)})))()`
+      )
+    )
+    assert(
+      copyCredential.password === 's3cret-pw',
+      `副本凭据经主进程解密回读仍是原密码（getCredential password=${JSON.stringify(copyCredential.password)}）`
+    )
+    const rawConnections = JSON.parse(
+      fs.readFileSync(path.join(USER_DATA_DIR, 'connections.json'), 'utf8')
+    )
+    const copyRow = rawConnections.find((row) => row.id === copyVo.id)
+    if (!copyRow) throw new Error('落盘文件里找不到副本记录')
+    assert(
+      typeof copyRow.secret === 'string' && copyRow.secret.length > 0 && copyRow.secret !== 's3cret-pw',
+      `副本在落盘文件里带密文字段（secret 长度 ${copyRow.secret ? copyRow.secret.length : 0}，明文未落盘）`
+    )
+    await cdp.evaluate(`window.__e2eUI.clickConnectionAction('E2E 测试机 副本', '编辑')`)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '编辑连接'`,
+      '打开副本的编辑表单'
+    )
+    await waitForCondition(
+      cdp,
+      copyPasswordEchoed,
+      '再次打开副本编辑表单时密码仍是原值（凭据真的落在了副本上）'
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '取消后编辑表单关闭')
+
+    // -----------------------------------------------------------------------
+    // 12.16 终端字号缩放：Ctrl+滚轮放大 → 顶部 .term-hud 出现并约 1s 后消失；
+    //       devicePixelRatio 全程不变（证明 Ctrl+滚轮没有被 Chromium 抢去整页缩放）；
+    //       右键菜单「放大 / 缩小 / 复位字号」三项可用；Ctrl+= / Ctrl+0 仍生效
+    // -----------------------------------------------------------------------
+    await cdp.evaluate(`window.__e2eUI.activateLastTerminalTab()`)
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.terminal-host:not(.hidden) .xterm-rows')`,
+      '切回终端标签（字号缩放用例需要可见终端）'
+    )
+    /** 缩放现场：持久化字号、xterm 实际字号与行高、缩放提示、devicePixelRatio */
+    const zoomProbe = `JSON.stringify((() => {
+      const host = document.querySelector('.terminal-host:not(.hidden)')
+      const rows = host ? host.querySelector('.xterm-rows') : null
+      const firstRow = rows ? rows.querySelector('div') : null
+      const hud = host ? host.querySelector('.term-hud') : null
+      const screen = host ? host.querySelector('.xterm-screen') : null
+      return {
+        stored: window.localStorage.getItem('ssh-client:font-size'),
+        rowsFontSize: rows ? getComputedStyle(rows).fontSize : null,
+        rowHeight: firstRow ? Number(firstRow.getBoundingClientRect().height.toFixed(2)) : null,
+        screenHeight: screen ? Number(screen.getBoundingClientRect().height.toFixed(2)) : null,
+        hud: hud ? hud.textContent : null,
+        dpr: window.devicePixelRatio
+      }
+    })())`
+    /**
+     * 在页面内用 rAF 高频轮询（只存在约 900ms 的 .term-hud 用 CDP 轮询会漏掉）。
+     * @param {string} expression 命中时返回真值的表达式
+     * @param {number} timeout 超时毫秒数
+     * @returns {Promise<any>} 命中值；超时返回 null
+     */
+    const waitInPageFor = (expression, timeout = 3000) =>
+      tryEvaluate(
+        cdp,
+        `(async () => {
+          const deadline = performance.now() + ${timeout}
+          while (performance.now() < deadline) {
+            const value = (${expression})
+            if (value) return value
+            await new Promise((resolve) => requestAnimationFrame(resolve))
+          }
+          return null
+        })()`
+      )
+    /** 可见终端中心的屏幕坐标（滚轮必须落在终端上才会被终端捕获） */
+    const terminalPoint = async () =>
+      JSON.parse(
+        await cdp.evaluate(`JSON.stringify((() => {
+          const rect = document.querySelector('.terminal-host:not(.hidden)').getBoundingClientRect()
+          return {
+            x: Math.round(rect.left + rect.width / 2),
+            y: Math.round(rect.top + rect.height / 2)
+          }
+        })())`)
+      )
+    const zoomBaseline = JSON.parse(await cdp.evaluate(zoomProbe))
+    assert(
+      zoomBaseline.stored === '14' && zoomBaseline.hud === null,
+      `缩放前字号基线为 14 且没有残留提示（stored=${zoomBaseline.stored}，hud=${JSON.stringify(zoomBaseline.hud)}）`
+    )
+    const zoomPoint = await terminalPoint()
+    const wheelAt = Date.now()
+    await cdp.dispatchCtrlWheel({ x: zoomPoint.x, y: zoomPoint.y, deltaY: -120 })
+    const hudAfterZoomIn = await waitInPageFor(
+      `(() => {
+        const hud = document.querySelector('.terminal-host:not(.hidden) .term-hud')
+        return hud ? hud.textContent : null
+      })()`
+    )
+    const zoomedIn = JSON.parse(await cdp.evaluate(zoomProbe))
+    assert(
+      zoomedIn.stored === '15',
+      `Ctrl+滚轮向上滚一格把字号从 14 放大到 15 并持久化（localStorage=${zoomedIn.stored}）`
+    )
+    assert(
+      zoomedIn.dpr === zoomBaseline.dpr,
+      `缩放后 devicePixelRatio 仍为 ${zoomedIn.dpr}（Ctrl+滚轮没有被 Chromium 抢去整页缩放）`
+    )
+    assert(
+      zoomedIn.rowHeight > zoomBaseline.rowHeight ||
+        zoomedIn.rowsFontSize !== zoomBaseline.rowsFontSize,
+      `终端实际渲染随之变化（行高 ${zoomBaseline.rowHeight} → ${zoomedIn.rowHeight}px，行字号 ${zoomBaseline.rowsFontSize} → ${zoomedIn.rowsFontSize}）`
+    )
+    assert(
+      hudAfterZoomIn === '字号 15',
+      `放大后终端顶部出现缩放提示 .term-hud（文案「${hudAfterZoomIn}」）`
+    )
+    const hudGone = await waitFor(
+      cdp,
+      `!document.querySelector('.terminal-host:not(.hidden) .term-hud')`,
+      5000
+    )
+    const hudAliveMs = Date.now() - wheelAt
+    if (!hudGone) throw new Error('缩放提示 .term-hud 超过 5s 仍未消失')
+    assert(
+      hudAliveMs >= 500 && hudAliveMs <= 4000,
+      `缩放提示自动消失（从滚轮派发到消失实测 ${hudAliveMs}ms，源码设定 900ms）`
+    )
+
+    await cdp.dispatchCtrlWheel({ x: zoomPoint.x, y: zoomPoint.y, deltaY: 120 })
+    const hudAfterZoomOut = await waitInPageFor(
+      `(() => {
+        const hud = document.querySelector('.terminal-host:not(.hidden) .term-hud')
+        return hud ? hud.textContent : null
+      })()`
+    )
+    const zoomedOut = JSON.parse(await cdp.evaluate(zoomProbe))
+    assert(
+      zoomedOut.stored === '14',
+      `Ctrl+滚轮向下滚一格把字号缩回默认值 14（localStorage=${zoomedOut.stored}）`
+    )
+    assert(
+      hudAfterZoomOut === '字号已复位',
+      `缩回默认字号时提示文案为「字号已复位」（实际「${hudAfterZoomOut}」）`
+    )
+
+    /** 在可见终端上右键展开上下文菜单 */
+    const openTerminalMenu = async (label) => {
+      await cdp.evaluate(`(() => {
+        const host = document.querySelector('.terminal-host:not(.hidden)')
+        host.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true, cancelable: true, clientX: 240, clientY: 240
+        }))
+        return true
+      })()`)
+      await waitForCondition(cdp, `!!document.querySelector('.ctx-menu')`, label)
+    }
+
+    await openTerminalMenu('右键终端弹出上下文菜单（字号菜单项用例）')
+    const zoomMenuItems = await cdp.evaluate(
+      `Array.from(document.querySelectorAll('.ctx-menu-item')).map((el) => el.textContent.trim()).join('|')`
+    )
+    assert(
+      zoomMenuItems.includes('放大字号') &&
+        zoomMenuItems.includes('缩小字号') &&
+        zoomMenuItems.includes('复位字号'),
+      `右键菜单包含字号三项（${zoomMenuItems}）`
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.ctx-menu-item', '放大字号')`)
+    await waitForCondition(
+      cdp,
+      `window.localStorage.getItem('ssh-client:font-size') === '15' && !document.querySelector('.ctx-menu')`,
+      '点「放大字号」后字号变为 15，且菜单收起'
+    )
+    await openTerminalMenu('再次右键弹出菜单（复位字号）')
+    await cdp.evaluate(`window.__e2eUI.clickByText('.ctx-menu-item', '复位字号')`)
+    await waitForCondition(
+      cdp,
+      `window.localStorage.getItem('ssh-client:font-size') === '14' && !document.querySelector('.ctx-menu')`,
+      '点「复位字号」后字号回到默认值 14，且菜单收起'
+    )
+    await openTerminalMenu('再次右键弹出菜单（缩小字号）')
+    await cdp.evaluate(`window.__e2eUI.clickByText('.ctx-menu-item', '缩小字号')`)
+    const hudAfterMenuZoomOut = await waitInPageFor(
+      `(() => {
+        const hud = document.querySelector('.terminal-host:not(.hidden) .term-hud')
+        return hud ? hud.textContent : null
+      })()`
+    )
+    await waitForCondition(
+      cdp,
+      `window.localStorage.getItem('ssh-client:font-size') === '13' && !document.querySelector('.ctx-menu')`,
+      '点「缩小字号」后字号变为 13，且菜单收起'
+    )
+    // 右键菜单触发的缩放与快捷键 / 滚轮共用同一条 HUD 提示链路
+    assert(
+      hudAfterMenuZoomOut === '字号 13',
+      `右键菜单缩放同样弹出提示（实际「${hudAfterMenuZoomOut}」）`
+    )
+
+    // Ctrl+= / Ctrl+0 仍生效（若 Electron 默认菜单还在，Ctrl+= 会被菜单加速键抢走，既不改字号也会整页缩放）
+    if (!(await cdp.evaluate(focusActiveTerminal))) {
+      throw new Error('激活终端的输入区无法获得焦点，无法复验字号快捷键')
+    }
+    const dprBeforeShortcut = await cdp.evaluate(`window.devicePixelRatio`)
+    await cdp.dispatchKey({ key: '=', code: 'Equal', windowsVirtualKeyCode: 187, modifiers: 2 })
+    await waitForCondition(
+      cdp,
+      `window.localStorage.getItem('ssh-client:font-size') === '14'`,
+      'Ctrl+= 仍能把字号从 13 放大到 14（Ctrl+= 未被默认菜单抢走）'
+    )
+    const dprAfterShortcut = await cdp.evaluate(`window.devicePixelRatio`)
+    assert(
+      dprAfterShortcut === dprBeforeShortcut,
+      `快捷键缩放后 devicePixelRatio 仍为 ${dprAfterShortcut}（整页未被缩放）`
+    )
+    await cdp.dispatchKey({ key: '0', code: 'Digit0', windowsVirtualKeyCode: 48, modifiers: 2 })
+    await waitForCondition(
+      cdp,
+      `window.localStorage.getItem('ssh-client:font-size') === '14' &&
+       document.querySelector('.terminal-host:not(.hidden) .term-hud')?.textContent === '字号已复位'`,
+      'Ctrl+0 复位并弹出「字号已复位」提示（快捷键链路完好）'
+    )
+
+    // -----------------------------------------------------------------------
     // 13. 终端搜索：Ctrl+F 展开搜索栏，命中计数随关键词变化
     // 放在最后执行：搜索栏一旦因产品缺陷不可用，不会挡住前面的用例取证
     // -----------------------------------------------------------------------
@@ -2041,6 +2899,13 @@ async function main() {
       cdp,
       `document.documentElement.dataset.theme === 'dark' && window.localStorage.getItem('ssh-client:theme') === 'dark'`,
       '重新加载后主题仍按持久化值生效（localStorage 持久化）'
+    )
+    // 12.14 把侧栏停在 332px 并写入 localStorage，重新加载后应当按持久化值恢复
+    await waitForCondition(
+      cdp,
+      `getComputedStyle(document.querySelector('.app')).getPropertyValue('--sidebar-width').trim() === '332px' &&
+       Math.round(document.querySelector('.sidebar').getBoundingClientRect().width) === 332`,
+      '重新加载后侧栏宽度按 localStorage 恢复为 332px（宽度持久化生效）'
     )
     await waitForCondition(
       cdp,

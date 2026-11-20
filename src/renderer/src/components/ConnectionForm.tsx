@@ -9,6 +9,13 @@ interface Props {
   initial?: ConnectionVO
   /** 新增模式：标题显示「新建连接」，提交时不带 id；复制连接会传空 id 的草稿，同样按新增处理 */
   isNew?: boolean
+  /**
+   * 复制连接时传入源连接 id：表单会从源连接读取已保存的凭据并回显，
+   * 用户直接保存即可让副本带上同样的密码 / 私钥口令。
+   */
+  inheritedCredentialFrom?: string
+  /** 复制连接的源连接展示名，用于提示文案 */
+  inheritedCredentialName?: string
   /** 提交保存，由本组件负责把错误展示在表单内 */
   onSubmit(dto: SaveConnectionDTO): Promise<void>
   /** 取消并关闭表单 */
@@ -20,11 +27,20 @@ interface Props {
  * @param props 见 Props
  * @returns 表单弹窗元素
  */
-function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JSX.Element {
+function ConnectionForm({
+  initial,
+  isNew,
+  inheritedCredentialFrom,
+  inheritedCredentialName,
+  onSubmit,
+  onCancel
+}: Props): React.JSX.Element {
   // isNew 为真或草稿 id 为空都算新增：复制连接传进来的 draft 就是没有 id 的
   const isCreate = isNew === true || !initial?.id
   // 「清除凭据」只对已保存的连接有意义，新增与复制场景下没有可清除的凭据
   const hasStoredCredential = !isCreate && initial?.hasCredential === true
+  // 复制连接：草稿本身没有 id，凭据从源连接读取并回显，保证副本能直接连上
+  const inheritsCredential = Boolean(inheritedCredentialFrom) && initial?.hasCredential === true
 
   const [name, setName] = useState(initial?.name ?? '')
   const [host, setHost] = useState(initial?.host ?? '')
@@ -53,12 +69,13 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
 
   useFocusTrap(modalRef, onCancel)
 
-  // 编辑已保存凭据的连接时按需拉取明文回显，让用户看到库里实际存着的那份
+  // 编辑已保存连接、或复制连接时，按需拉取明文回显，让用户看到库里实际存着的那份
   useEffect(() => {
-    if (!hasStoredCredential || !initial?.id) return
+    const sourceId = hasStoredCredential ? initial?.id : inheritedCredentialFrom
+    if (!sourceId || (!hasStoredCredential && !inheritsCredential)) return
     let alive = true
     void window.api.connections
-      .getCredential(initial.id)
+      .getCredential(sourceId)
       .then((vo) => {
         // 弹窗已关闭或已换连接时丢弃结果，避免对已卸载组件 setState
         if (!alive) return
@@ -73,7 +90,7 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
     return () => {
       alive = false
     }
-  }, [hasStoredCredential, initial?.id])
+  }, [hasStoredCredential, inheritsCredential, initial?.id, inheritedCredentialFrom])
 
   /** 弹出系统文件选择框挑选私钥文件 */
   const pickPrivateKey = async (): Promise<void> => {
@@ -134,14 +151,18 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
       ? credentialEchoed
         ? '已回显，可修改'
         : '留空表示保留已保存的密码'
-      : '可选'
+      : inheritsCredential
+        ? '已从原连接带入，可修改'
+        : '可选'
   const passphrasePlaceholder = clearCredential
     ? '已勾选清除，保存后口令被清空'
     : hasStoredCredential
       ? credentialEchoed
         ? '已回显，可修改'
         : '留空表示保留已保存的口令'
-      : '私钥未加密时留空'
+      : inheritsCredential
+        ? '已从原连接带入，可修改'
+        : '私钥未加密时留空'
 
   return (
     <div
@@ -179,6 +200,13 @@ function ConnectionForm({ initial, isNew, onSubmit, onCancel }: Props): React.JS
         </div>
 
         <div className="modal-body">
+          {inheritsCredential && (
+            <p className="modal-note">
+              已从「{inheritedCredentialName || '原连接'}
+              」带入密码与私钥口令，直接保存即可让副本沿用； 清空输入框则副本不保存凭据。
+            </p>
+          )}
+
           <label className="field">
             <span>名称</span>
             <input
