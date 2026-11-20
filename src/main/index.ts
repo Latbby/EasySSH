@@ -1,25 +1,65 @@
 import { app, shell, BrowserWindow } from 'electron'
 import { appendFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { registerIpcHandlers, type IpcHandle } from './ipc'
 
 /**
- * 启动日志文件，放在系统临时目录。
- * GUI 应用没有控制台，启动期异常只会表现为"双击没反应"，因此关键节点与异常都要落盘，
- * 用户取回这个文件即可定位问题。
+ * 关于沙箱与受管控环境的说明。
+ *
+ * 部分受管控的 Windows 环境（企业安全软件、VPN 客户端驻留的内核驱动与进程保护服务）
+ * 会拦截 Chromium 的沙箱初始化，进程会在创建窗口之前静默退出：表现为双击毫无反应，
+ * 且事件日志、崩溃转储、应用自身日志里都查不到任何记录，极难排查。
+ *
+ * 注意：`app.commandLine.appendSwitch('no-sandbox')` 实测**无效** —— 该开关作用于 main.js
+ * 执行之前的沙箱初始化阶段，只能通过真实命令行参数传入。因此受管控环境下必须用同目录的
+ * start.bat（或 start.lnk，二者都带 --no-sandbox）启动，直接双击 exe 无法运行。
+ * 实测 --no-sandbox 是唯一必需的参数，GPU 相关开关无效且不必添加。
  */
-const startupLogFile = join(tmpdir(), 'ssh-client-startup.log')
+
+// 允许通过环境变量覆盖数据目录，便于自动化测试与便携部署，必须在 app ready 之前设置
+if (process.env.SSH_CLIENT_USER_DATA) {
+  app.setPath('userData', process.env.SSH_CLIENT_USER_DATA)
+}
+
+/** 选定并缓存的日志文件路径 */
+let logFile: string | undefined
+
+/**
+ * 依次尝试可写的日志位置并缓存第一个成功的。
+ * GUI 应用没有控制台，启动期异常只会表现为"双击没反应"，因此日志必须落到能取回的地方。
+ * @returns 可写的日志文件路径，全部不可写时返回 undefined
+ */
+function resolveLogFile(): string | undefined {
+  if (logFile) return logFile
+  const candidates = [
+    join(tmpdir(), 'ssh-client-startup.log'),
+    join(app.getPath('userData'), 'startup.log'),
+    join(dirname(process.execPath), 'ssh-client-startup.log')
+  ]
+  for (const candidate of candidates) {
+    try {
+      appendFileSync(candidate, '', 'utf8')
+      logFile = candidate
+      return candidate
+    } catch {
+      // 该位置不可写，继续尝试下一个
+    }
+  }
+  return undefined
+}
 
 /**
  * 追加一条启动日志，写入失败绝不影响应用启动。
  * @param message 日志内容
  */
 function log(message: string): void {
+  const target = resolveLogFile()
+  if (!target) return
   try {
-    appendFileSync(startupLogFile, `[${new Date().toISOString()}] ${message}\n`, 'utf8')
+    appendFileSync(target, `[${new Date().toISOString()}] ${message}\n`, 'utf8')
   } catch {
     // 忽略写入失败
   }
@@ -27,7 +67,12 @@ function log(message: string): void {
 
 log(`=== 主进程开始执行 pid=${process.pid} ===`)
 log(`exe=${process.execPath}`)
-log(`electron=${process.versions.electron} node=${process.versions.node} packaged=${app.isPackaged}`)
+log(
+  `electron=${process.versions.electron} node=${process.versions.node} packaged=${app.isPackaged}`
+)
+log(
+  `兼容模式=${process.env.SSH_CLIENT_NO_COMPAT === '1' ? '已关闭' : '开启'} 日志=${resolveLogFile()}`
+)
 
 // 未捕获异常必须落盘，否则用户只会看到窗口一闪而过或完全没有反应
 process.on('uncaughtException', (error) => {
@@ -36,11 +81,6 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (reason) => {
   log(`[未处理的 Promise 拒绝] ${reason instanceof Error ? reason.stack : String(reason)}`)
 })
-
-// 允许通过环境变量覆盖数据目录，便于自动化测试与便携部署，必须在 app ready 之前设置
-if (process.env.SSH_CLIENT_USER_DATA) {
-  app.setPath('userData', process.env.SSH_CLIENT_USER_DATA)
-}
 
 /** IPC 句柄，应用退出时用它释放全部 SSH 连接 */
 let ipcHandle: IpcHandle | undefined

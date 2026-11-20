@@ -1,32 +1,35 @@
 @echo off
-chcp 65001 >nul
-title SSH 客户端 - 诊断启动
+rem ============================================================
+rem  SSH Client - diagnostic launch
+rem
+rem  Same flags as start.bat, but this window stays open and shows
+rem  the exit code, so failures are visible instead of silent.
+rem
+rem  Launch log: %TEMP%\ssh-client-startup.log
+rem ============================================================
+
+title SSH Client - Diagnostics
 
 echo ============================================================
-echo   SSH 客户端 诊断启动
+echo  SSH Client - Diagnostic launch
 echo ------------------------------------------------------------
-echo   这个窗口会显示应用的启动日志与退出码。
-echo   如果窗口一闪而过或没有任何反应，这里能看出原因。
-echo.
-echo   启动日志文件：
-echo     %TEMP%\ssh-client-startup.log
+echo  Launch log: %TEMP%\ssh-client-startup.log
 echo ============================================================
 echo.
 
 set ELECTRON_ENABLE_LOGGING=1
 set ELECTRON_ENABLE_STACK_DUMPING=1
 
-echo [启动] 正在运行 ssh-client.exe ...
-echo.
-"%~dp0ssh-client.exe"
+cd /d "%~dp0"
+"ssh-client.exe" --no-sandbox
 set EXITCODE=%ERRORLEVEL%
 
 echo.
 echo ============================================================
-echo [退出码] %EXITCODE%
+echo [Exit code] %EXITCODE%
 echo.
-echo 请把本窗口的完整内容截图发回，并附上日志文件内容：
-echo   %TEMP%\ssh-client-startup.log
+echo If the app still fails, please send this window's content
+echo together with the log file above.
 echo ============================================================
 echo.
 pause

@@ -11,12 +11,16 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
-# 诊断启动器随包分发，用户双击即可看到启动日志与退出码
+# 启动器随包分发：受管控环境下必须带 --no-sandbox 启动，直接双击 exe 会被静默拦截。
+# start.lnk 与 exe 同目录，内部记录的是相对路径，因此整目录移动后依然有效。
+# 注意：bat 必须保持纯 ASCII 内容，中文注释在 cmd 的 GBK 环境下会解析错乱导致脚本整体失效。
 extraFiles:
+  - from: build/start.lnk
+    to: start.lnk
+  - from: build/start.bat
+    to: start.bat
   - from: build/run-debug.bat
     to: run-debug.bat
-  - from: build/run-compat.bat
-    to: run-compat.bat
 win:
   executableName: ssh-client
   # 只产出免安装目录版（zip 会连同 win-unpacked 一起生成）。
