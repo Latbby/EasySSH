@@ -2,6 +2,9 @@
 
 一个可保存连接的跨平台 SSH 客户端（EasySSH），基于 Electron + TypeScript 构建。
 
+> 参与开发（含 AI 代理）请先读 [AGENTS.md](AGENTS.md)：项目约束、代码约定、
+> 新功能与修 bug 的流程、排查手册、提交与发布规范。
+
 ## 技术栈
 
 | 层   | 选型                                                      | 说明                                        |
