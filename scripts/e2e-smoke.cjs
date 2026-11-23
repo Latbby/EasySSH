@@ -26,6 +26,11 @@
  *      终端 Ctrl+滚轮缩放（.term-hud 出现并约 1s 后消失、devicePixelRatio 不变证明没有整页缩放、
  *      右键菜单「放大/缩小/复位字号」三项可用、Ctrl+= 与 Ctrl+0 仍生效）、
  *      复制连接把手动保存的密码一并带给副本（保存后 hasCredential 为真且再次打开仍是原值）
+ *  14. 本轮（task-27）SFTP 上传同名文件三选项与终端真实键盘输入（见 12.17、12.18）：
+ *      CDP Input.dispatchKeyEvent 注入真实按键输入 echo a b / Shift+A / 中文 insertText，
+ *      断言 SSH 测试服务端收到的字节与终端回显一致（用户报的「空格打不出来」正在这个盲区）；
+ *      CDP Input.dispatchDragEvent 拖拽注入触发同名冲突，「文件已存在」弹窗的取消 / 覆盖 /
+ *      备份后上传三条真实点击路径，并对远端内容与「原名.日期」备份命名取证
  *
  * 注意：脚本优先使用 dist/win-unpacked 下的打包产物，若该产物早于本轮源码改动，
  * 新增用例会因为跑的是旧代码而失败；验证新代码前请先把 dist 目录改名让脚本回退到 out/ 开发态。
@@ -54,6 +59,9 @@ const MANY_FILES = 2000
 
 /** 使用临时 userData 目录，避免污染真实用户配置 */
 const USER_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'easyssh-e2e-'))
+
+/** 用例自己创建的临时目录（拖拽上传的源文件等），收尾时统一清理 */
+const EXTRA_TEMP_DIRS = []
 
 let passed = 0
 
@@ -156,6 +164,22 @@ memfs.set(`${FAKE_HOME}/e2e-dir2/sub/deep.txt`, { type: 'file', content: Buffer.
  * 渲染进程内部实现（例如 load 是否重复调用）随时可能变，服务端收到的请求才是用户可感知的事实。
  */
 const sftpStats = { opendir: 0, open: 0 }
+
+/**
+ * shell 通道收到的原始字节。
+ * 终端键盘用例不能只看屏幕：屏幕是回显的结果，真正的因果链是「按键 → xterm 编码 → IPC →
+ * SSH 通道 → 服务端」。把服务端收到的字节留档，才能证明空格等字符确实送达（用户报的
+ * 「空格打不出来」如果只看屏幕，容易被别处的文本掩盖）。
+ */
+const shellObserved = { chunks: [] }
+
+/**
+ * 取出 shell 通道累计收到的字节。
+ * @returns {Buffer} 收到的全部字节
+ */
+function shellReceived() {
+  return Buffer.concat(shellObserved.chunks)
+}
 
 /**
  * 规范化远程路径。
@@ -420,6 +444,8 @@ function startTestServer(hostKey) {
           const stream = acceptShell()
           stream.write('E2E-欢迎使用测试 SSH 服务\r\n')
           stream.on('data', (chunk) => {
+            // 键盘用例要按字节核对「按键是否原样送达」，因此先留档再决定怎么回显
+            shellObserved.chunks.push(Buffer.from(chunk))
             const text = chunk.toString('utf8')
             if (text.includes('中文测试')) {
               stream.write('E2E-OK:收到中文\r\n')
@@ -575,6 +601,55 @@ async function connectCdp(wsUrl) {
       }
       await send('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' })
       await send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' })
+    },
+    /**
+     * 注入一次真实可打印按键（走浏览器输入管线，等价用户按下键盘上的这个键）。
+     *
+     * 只发 keyDown（带 text）+ keyUp，不额外补 char 事件：本机实测（Chromium/Electron 38）
+     * keyDown 带 text 时只派发 keydown/keyup，不会再合成 keypress；而显式补一个 char 事件
+     * 会让 xterm 的 keydown 与 keypress 两条链路各发一次字符，终端收到重复字符。
+     * 这与 Puppeteer 的 keyboard.press 做法一致。
+     * @param {{key: string, code: string, windowsVirtualKeyCode: number, text: string, modifiers?: number}} options 按键参数
+     * @returns {Promise<void>}
+     */
+    async typeKey({ key, code, windowsVirtualKeyCode, text, modifiers = 0 }) {
+      const base = {
+        modifiers,
+        key,
+        code,
+        windowsVirtualKeyCode,
+        nativeVirtualKeyCode: windowsVirtualKeyCode
+      }
+      await send('Input.dispatchKeyEvent', {
+        ...base,
+        type: 'keyDown',
+        text,
+        unmodifiedText: text
+      })
+      await send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' })
+    },
+    /**
+     * 注入一段 IME 式文本（等价中文输入法上屏），走 Chromium 的 insertText 输入事件。
+     * @param {string} text 要高亮上屏的文本
+     * @returns {Promise<void>}
+     */
+    async insertText(text) {
+      await send('Input.insertText', { text })
+    },
+    /**
+     * 注入一次真实拖拽（dragEnter → dragOver → drop）。
+     * dragData.files 里的磁盘路径会被 Chromium 变成带真实路径的 File 对象，
+     * 因此渲染进程的 webUtils.getPathForFile 能拿到绝对路径，走的是产品真实的拖拽上传链路。
+     * @param {number} x 落点 x
+     * @param {number} y 落点 y
+     * @param {string[]} files 本地文件绝对路径列表
+     * @returns {Promise<void>}
+     */
+    async dropFiles(x, y, files) {
+      const data = { items: [], files, dragOperationsMask: 1 }
+      await send('Input.dispatchDragEvent', { type: 'dragEnter', x, y, data })
+      await send('Input.dispatchDragEvent', { type: 'dragOver', x, y, data })
+      await send('Input.dispatchDragEvent', { type: 'drop', x, y, data })
     },
     /**
      * 发送一条任意 CDP 命令（Input / Emulation 等域）。
@@ -866,6 +941,16 @@ window.__e2eUI = {
       return badge && badge.textContent.trim() === '>_'
     })
     if (!tabs.length) throw new Error('没有终端标签')
+    tabs[tabs.length - 1].click()
+    return true
+  },
+  // 激活 SFTP 标签：上传冲突用例需要可见的 SFTP 面板（拖拽落点与提示条都限定在可见面板内）
+  activateSftpTab() {
+    const tabs = Array.from(document.querySelectorAll('.tab')).filter((el) => {
+      const badge = el.querySelector('.tab-kind')
+      return badge && badge.textContent.trim() === '⇅'
+    })
+    if (!tabs.length) throw new Error('没有 SFTP 标签')
     tabs[tabs.length - 1].click()
     return true
   }
@@ -2897,6 +2982,405 @@ async function main() {
     )
 
     // -----------------------------------------------------------------------
+    // 12.17 终端真实键盘输入：此前 e2e 只用 window.api.terminal.write 直写，
+    //       「物理按键 → xterm 编码 → IPC → SSH → 服务端」这条链路完全没覆盖，
+    //       用户报的「空格打不出来」正落在这个盲区。
+    //       这里用 CDP Input.dispatchKeyEvent 注入真实按键，以 SSH 服务端收到的字节为准取证，
+    //       再与终端回显比对（回显即服务端回写的字节）。
+    //       按键只发 keyDown（带 text）+ keyUp：本机实测 keyDown 带 text 时 Chromium 只派发
+    //       keydown/keyup，不会合成 keypress；若额外补一个 char 事件，xterm 的 keydown 与
+    //       keypress 两条链路会各发一次字符，服务端收到重复字符（探针结论见报告第十四节）。
+    // -----------------------------------------------------------------------
+    await cdp.evaluate(`window.__e2eUI.activateLastTerminalTab()`)
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.terminal-host:not(.hidden) .xterm-rows')`,
+      '切回终端标签（键盘用例需要可见终端）'
+    )
+    if (!(await cdp.evaluate(focusActiveTerminal))) {
+      throw new Error('激活终端的输入区无法获得焦点，无法测试真实键盘输入')
+    }
+
+    /** 键盘用例的按键表：key / code / Windows 虚拟键码 / 实际发出的文本 */
+    const KEY_SPECS = {
+      e: { key: 'e', code: 'KeyE', vk: 69, text: 'e' },
+      c: { key: 'c', code: 'KeyC', vk: 67, text: 'c' },
+      h: { key: 'h', code: 'KeyH', vk: 72, text: 'h' },
+      o: { key: 'o', code: 'KeyO', vk: 79, text: 'o' },
+      a: { key: 'a', code: 'KeyA', vk: 65, text: 'a' },
+      b: { key: 'b', code: 'KeyB', vk: 66, text: 'b' },
+      space: { key: ' ', code: 'Space', vk: 32, text: ' ' },
+      'Shift+Z': { key: 'Z', code: 'KeyZ', vk: 90, text: 'Z', modifiers: 8 },
+      Enter: { key: 'Enter', code: 'Enter', vk: 13, text: '\r' }
+    }
+
+    /**
+     * 逐键注入真实按键（等价用户依次敲下这些键）。
+     * @param {string[]} names KEY_SPECS 里的键名序列
+     */
+    const pressKeys = async (names) => {
+      for (const name of names) {
+        const spec = KEY_SPECS[name]
+        if (!spec) throw new Error(`未定义的按键：${name}`)
+        await cdp.typeKey({
+          key: spec.key,
+          code: spec.code,
+          windowsVirtualKeyCode: spec.vk,
+          text: spec.text,
+          modifiers: spec.modifiers || 0
+        })
+      }
+    }
+
+    // 12.17.1 输入 'echo a b'：空格必须原样送达远端（用户报的正是空格丢失）
+    const screenBeforeTyping = await cdp.evaluate(`window.__e2eUI.screenText()`)
+    assert(
+      !screenBeforeTyping.includes('echo a b'),
+      '输入前终端缓冲区里没有这段文本（后面的回显只能来自本次按键）'
+    )
+    const bytesBeforeTyping = shellReceived().length
+    await pressKeys(['e', 'c', 'h', 'o', 'space', 'a', 'space', 'b'])
+    const typedBytes = shellReceived().subarray(bytesBeforeTyping)
+    const typedText = typedBytes.toString('utf8')
+    assert(
+      typedBytes.equals(Buffer.from('echo a b', 'utf8')),
+      `真实按键逐字节送达 SSH 服务端（收到 ${JSON.stringify(typedText)}）`
+    )
+    assert(
+      (typedText.match(/ /g) || []).length === 2,
+      `服务端收到的 8 个字节里有 2 个空格，空格没有被吞掉（收到 ${JSON.stringify(typedText)}）`
+    )
+    await waitForCondition(
+      cdp,
+      `window.__e2eUI.screenText().includes('echo a b')`,
+      '终端回显出现带空格的 echo a b'
+    )
+    const screenAfterTyping = await cdp.evaluate(`window.__e2eUI.screenText()`)
+    assert(
+      screenAfterTyping.includes(typedText) && !screenAfterTyping.includes('echoab'),
+      `终端回显与服务端收到的字节一致（屏幕含 ${JSON.stringify(typedText)}，且没有出现丢空格的 echoab）`
+    )
+
+    // 12.17.2 回车：真实 Enter 只应发出一个 CR
+    const bytesBeforeEnter = shellReceived().length
+    await pressKeys(['Enter'])
+    assert(
+      shellReceived().subarray(bytesBeforeEnter).equals(Buffer.from('\r', 'utf8')),
+      '真实回车键只发出一个 CR（没有重复回车）'
+    )
+
+    // 12.17.3 大写组合：Shift+Z（modifiers=8 即 Shift），服务端收到大写字母
+    const screenBeforeUpper = await cdp.evaluate(`window.__e2eUI.screenText()`)
+    assert(!screenBeforeUpper.includes('Z'), '输入前终端缓冲区里没有大写 Z')
+    const bytesBeforeUpper = shellReceived().length
+    await pressKeys(['Shift+Z'])
+    const upperText = shellReceived().subarray(bytesBeforeUpper).toString('utf8')
+    assert(upperText === 'Z', `Shift+大写组合按键送达远端（收到 ${JSON.stringify(upperText)}）`)
+    await waitForCondition(cdp, `window.__e2eUI.screenText().includes('Z')`, '大写 Z 在终端回显中出现')
+    // 回显一致性按「行」比对：前一个用例写入的 \n 让光标停在下一行的行中，
+    // 回车后光标回到该行行首，大写 Z 覆盖掉一个前导空格，因此该行应形如「Z + 空格 + echo a b」
+    const echoRow = await cdp.evaluate(`(() => {
+      const rows = Array.from(
+        document.querySelectorAll('.terminal-host:not(.hidden) .xterm-rows > div')
+      )
+      const row = rows.find((el) => window.__e2eUI.normalizeText(el.textContent).includes('echo a b'))
+      return row ? window.__e2eUI.normalizeText(row.textContent).replace(/\\s+$/, '') : null
+    })()`)
+    assert(
+      typeof echoRow === 'string' && /^Z\s+echo a b$/.test(echoRow),
+      `大写 Z 落在回车后的行首，回显与服务端字节一致（该行「${echoRow}」）`
+    )
+
+    // 12.17.4 中文上屏：等价输入法上屏（Input.insertText 走 xterm 的 input 事件链路）
+    const screenBeforeChinese = await cdp.evaluate(`window.__e2eUI.screenText()`)
+    assert(!screenBeforeChinese.includes('中文上屏'), '输入前终端缓冲区里没有「中文上屏」')
+    await cdp.evaluate(focusActiveTerminal)
+    const bytesBeforeChinese = shellReceived().length
+    await cdp.insertText('中文上屏')
+    const chineseText = shellReceived().subarray(bytesBeforeChinese).toString('utf8')
+    assert(
+      chineseText === '中文上屏',
+      `中文上屏文本逐字节送达远端且无乱码（收到 ${JSON.stringify(chineseText)}）`
+    )
+    await waitForCondition(
+      cdp,
+      `window.__e2eUI.screenText().includes('中文上屏')`,
+      '中文上屏内容在终端回显中出现'
+    )
+
+    // -----------------------------------------------------------------------
+    // 12.18 SFTP 上传同名文件三选项：取消 / 覆盖 / 备份后上传三条真实点击路径
+    //   上传入口用 CDP Input.dispatchDragEvent 拖拽注入（dragEnter → dragOver → drop）：
+    //   dragData.files 里的磁盘路径会被 Chromium 变成带真实路径的 File，渲染进程的
+    //   webUtils.getPathForFile 能取到绝对路径，因此走的是产品真实的 onDrop → uploadPaths 链路，
+    //   而不是从页面直接调 IPC 绕过界面。
+    //   远端内容取证直接读测试服务端的内存文件系统（memfs），它才是远端内容的事实来源。
+    // -----------------------------------------------------------------------
+    await cdp.evaluate(`window.__e2eUI.activateSftpTab()`)
+    await waitForCondition(
+      cdp,
+      `!!document.querySelector('.sftp-panel:not(.hidden) .sftp-list')`,
+      '切到 SFTP 标签（上传冲突用例需要可见面板）'
+    )
+    await gotoRemoteDir(FAKE_HOME, 'e2e-dir')
+
+    /** 本地临时目录：拖拽注入的源文件必须真实存在于磁盘上 */
+    const conflictWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'easyssh-e2e-upload-'))
+    EXTRA_TEMP_DIRS.push(conflictWorkDir)
+
+    /**
+     * 把本地文件拖进可见 SFTP 面板（等价用户把文件拖到面板上松手）。
+     * @param {string[]} localPaths 本地文件绝对路径列表
+     */
+    const dropLocalFiles = async (localPaths) => {
+      const point = JSON.parse(
+        await cdp.evaluate(`JSON.stringify((() => {
+          const rect = document.querySelector('.sftp-panel:not(.hidden)').getBoundingClientRect()
+          return {
+            x: Math.round(rect.left + rect.width / 2),
+            y: Math.round(rect.top + rect.height / 2)
+          }
+        })())`)
+      )
+      await cdp.dropFiles(point.x, point.y, localPaths)
+    }
+
+    /**
+     * 拖拽单个本地文件。
+     * @param {string} localPath 本地文件绝对路径
+     */
+    const dropLocalFile = (localPath) => dropLocalFiles([localPath])
+
+    /** 读取可见 SFTP 面板的提示条文案 */
+    const sftpMessage = () =>
+      cdp.evaluate(
+        `document.querySelector('.sftp-panel:not(.hidden) .sftp-message')?.textContent ?? ''`
+      )
+
+    /** 同名冲突弹窗现场：标题、按钮文案、列出的文件与默认聚焦项；弹窗不在时返回 null */
+    const conflictDialogState = async () =>
+      JSON.parse(
+        await cdp.evaluate(`JSON.stringify((() => {
+          const title = document.querySelector('.modal-title')
+          if (!title) return null
+          return {
+            title: title.textContent,
+            buttons: Array.from(document.querySelectorAll('.modal-foot button'))
+              .map((el) => el.textContent.trim()),
+            files: Array.from(document.querySelectorAll('.modal-body li'))
+              .map((el) => el.textContent.trim()),
+            focused: document.activeElement ? document.activeElement.textContent.trim() : null
+          }
+        })())`)
+      )
+
+    // 12.18.1 取消：远端内容不变，提示条给出未处理文案
+    const cancelLocal = path.join(conflictWorkDir, 'conflict-cancel.txt')
+    fs.writeFileSync(cancelLocal, '远端旧内容-第一次', 'utf8')
+    await dropLocalFile(cancelLocal)
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes('conflict-cancel.txt')`,
+      '拖拽注入首次上传成功，远端出现 conflict-cancel.txt'
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/conflict-cancel.txt`)?.content.toString('utf8') ===
+        '远端旧内容-第一次',
+      '拖拽注入链路可用：首次上传内容已落到远端'
+    )
+    // 本地内容改成新值后再拖同一个文件：命中同名冲突，界面应当弹窗询问而不是直接覆盖
+    fs.writeFileSync(cancelLocal, '本地新内容-第二次', 'utf8')
+    await dropLocalFile(cancelLocal)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '文件已存在'`,
+      '同名文件再上传时弹出「文件已存在」弹窗'
+    )
+    const conflictDialog = await conflictDialogState()
+    assert(
+      conflictDialog.buttons.join('|') === '取消|备份后上传|覆盖',
+      `弹窗三选项齐全（${conflictDialog.buttons.join('、')}）`
+    )
+    assert(
+      conflictDialog.files.includes('conflict-cancel.txt'),
+      `弹窗列出同名文件名（${conflictDialog.files.join('、')}）`
+    )
+    assert(conflictDialog.focused === '取消', '弹窗默认聚焦「取消」，回车不会直接覆盖同名文件')
+
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '点「取消」后弹窗关闭')
+    await waitForCondition(
+      cdp,
+      `/(未处理|未上传)/.test(document.querySelector('.sftp-panel:not(.hidden) .sftp-message')?.textContent ?? '')`,
+      '取消后提示条给出未处理 / 未上传文案'
+    )
+    const cancelMessage = await sftpMessage()
+    assert(
+      cancelMessage.includes('1 个同名文件未上传'),
+      `本次没有其它文件上传，提示条用「未上传」文案（${cancelMessage}）`
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/conflict-cancel.txt`)?.content.toString('utf8') ===
+        '远端旧内容-第一次',
+      '取消后远端内容不变（仍是旧内容，没有被新内容覆盖）'
+    )
+
+    // 12.18.2 覆盖：点「覆盖」后远端内容变成新文件内容
+    await dropLocalFile(cancelLocal)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '文件已存在'`,
+      '再次拖拽同名文件重新弹出「文件已存在」（覆盖用例）'
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '覆盖')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '点「覆盖」后弹窗关闭')
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-message')?.textContent ?? '').includes('已覆盖')`,
+      '覆盖后提示条说明已覆盖同名文件'
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/conflict-cancel.txt`)?.content.toString('utf8') ===
+        '本地新内容-第二次',
+      '覆盖后远端内容变为本地新内容'
+    )
+
+    // 12.18.3 备份后上传：旧文件改名为「原名.日期」，新文件是新内容
+    /** 备份名日期后缀，与 src/main/sftp.ts 的 backupDateSuffix 同格式（yyyyMMdd） */
+    const backupDateSuffixOf = (date) => {
+      const pad = (value) => String(value).padStart(2, '0')
+      return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`
+    }
+    const backupLocal = path.join(conflictWorkDir, 'conflict-backup.txt')
+    fs.writeFileSync(backupLocal, '备份前-旧内容', 'utf8')
+    await dropLocalFile(backupLocal)
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes('conflict-backup.txt')`,
+      '拖拽注入首次上传成功，远端出现 conflict-backup.txt'
+    )
+    fs.writeFileSync(backupLocal, '备份后-新内容', 'utf8')
+    await dropLocalFile(backupLocal)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '文件已存在'`,
+      '同名文件再上传时弹出「文件已存在」（备份用例）'
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '备份后上传')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '点「备份后上传」后弹窗关闭')
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-message')?.textContent ?? '').includes('已备份')`,
+      '备份后提示条说明已备份同名文件'
+    )
+    const backupName = await cdp.evaluate(`(() => {
+      const names = Array.from(
+        document.querySelectorAll('.sftp-panel:not(.hidden) .sftp-name-text')
+      ).map((el) => el.textContent.trim())
+      return names.find((name) => /^conflict-backup\\.txt\\.\\d{8}(-\\d+)?$/.test(name)) ?? null
+    })()`)
+    if (!backupName) throw new Error('面板列表里没有出现「原名.日期」形式的备份文件')
+    const actualSuffix = backupName.slice('conflict-backup.txt.'.length)
+    assert(
+      actualSuffix === backupDateSuffixOf(new Date()) ||
+        actualSuffix === backupDateSuffixOf(new Date(Date.now() - 24 * 3600 * 1000)),
+      `备份名后缀是当天日期 yyyyMMdd（实际 ${actualSuffix}）`
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/${backupName}`)?.content.toString('utf8') === '备份前-旧内容',
+      `备份文件保留的是被替换前的旧内容（${backupName}）`
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/conflict-backup.txt`)?.content.toString('utf8') === '备份后-新内容',
+      '备份后上传写入的是新文件内容'
+    )
+    const backupMessage = await sftpMessage()
+    assert(
+      backupMessage.includes('已备份 1 个同名文件') && backupMessage.includes(backupName),
+      `提示条报出备份文件名（${backupMessage}）`
+    )
+
+    // 12.18.4 同日重复备份顺延 -2：再改一次本地内容并选「备份后上传」
+    fs.writeFileSync(backupLocal, '备份后-第三次内容', 'utf8')
+    await dropLocalFile(backupLocal)
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '文件已存在'`,
+      '第三次拖拽同名文件重新弹出「文件已存在」（-2 备份用例）'
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '备份后上传')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '第二次备份后弹窗关闭')
+    // 弹窗在发起上传前就关闭了，必须等面板刷新出第二个备份行再读名字
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-list')?.textContent ?? '').includes('conflict-backup.txt.${actualSuffix}-2')`,
+      '面板列表里出现第二个备份文件（原名.日期-2）'
+    )
+    const secondBackupName = await cdp.evaluate(`(() => {
+      const prefix = 'conflict-backup.txt.' + ${JSON.stringify(actualSuffix)} + '-'
+      const names = Array.from(
+        document.querySelectorAll('.sftp-panel:not(.hidden) .sftp-name-text')
+      ).map((el) => el.textContent.trim())
+      return names.find((name) => name.startsWith(prefix)) ?? null
+    })()`)
+    assert(
+      secondBackupName === `conflict-backup.txt.${actualSuffix}-2`,
+      `同日重复备份顺延为 -2（实际 ${secondBackupName}）`
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/${secondBackupName}`)?.content.toString('utf8') === '备份后-新内容',
+      '第二个备份保存的是上一版内容'
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/conflict-backup.txt`)?.content.toString('utf8') ===
+        '备份后-第三次内容',
+      '主文件是第三次上传的内容'
+    )
+
+    // 12.18.5 一批里既有新文件又有同名冲突：提示条分列「已上传 x 个」与「y 个待处理 / 未处理」
+    const mixedNew = path.join(conflictWorkDir, 'conflict-mixed-new.txt')
+    fs.writeFileSync(mixedNew, '同批新文件内容', 'utf8')
+    fs.writeFileSync(cancelLocal, '本地新内容-第三次', 'utf8')
+    await dropLocalFiles([mixedNew, cancelLocal])
+    await waitForCondition(
+      cdp,
+      `document.querySelector('.modal-title')?.textContent === '文件已存在'`,
+      '一批里含同名文件时同样弹出「文件已存在」'
+    )
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-message')?.textContent ?? '').includes('待处理')`,
+      '弹窗期间提示条说明有同名文件待处理'
+    )
+    const mixedMessage = await sftpMessage()
+    assert(
+      mixedMessage.includes('已上传 1 个文件') && mixedMessage.includes('1 个同名文件待处理'),
+      `提示条分列已上传与待处理（${mixedMessage}）`
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/conflict-mixed-new.txt`)?.content.toString('utf8') ===
+        '同批新文件内容',
+      '同一批里的新文件照常上传（不受同名文件影响）'
+    )
+    await cdp.evaluate(`window.__e2eUI.clickByText('.modal-foot button', '取消')`)
+    await waitForCondition(cdp, `!document.querySelector('.modal-title')`, '点「取消」后弹窗关闭（混批）')
+    await waitForCondition(
+      cdp,
+      `(document.querySelector('.sftp-panel:not(.hidden) .sftp-message')?.textContent ?? '').includes('未处理')`,
+      '取消后提示条改用「未处理」文案（已有文件上传成功时）'
+    )
+    const mixedCancelMessage = await sftpMessage()
+    assert(
+      mixedCancelMessage.includes('已上传 1 个') && mixedCancelMessage.includes('1 个同名文件未处理'),
+      `提示条写明已上传与未处理数量（${mixedCancelMessage}）`
+    )
+    assert(
+      memfs.get(`${FAKE_HOME}/conflict-cancel.txt`)?.content.toString('utf8') ===
+        '本地新内容-第二次',
+      '取消后同名文件仍保持上一次覆盖后的内容'
+    )
+
+    // -----------------------------------------------------------------------
     // 13. 终端搜索：Ctrl+F 展开搜索栏，命中计数随关键词变化
     // 放在最后执行：搜索栏一旦因产品缺陷不可用，不会挡住前面的用例取证
     // -----------------------------------------------------------------------
@@ -3164,6 +3648,9 @@ async function main() {
     await closeServer(server)
     await sleep(500)
     fs.rmSync(USER_DATA_DIR, { recursive: true, force: true })
+    for (const dir of EXTRA_TEMP_DIRS) {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   }
 }
 

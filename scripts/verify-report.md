@@ -984,4 +984,148 @@ node scripts/ui-shot.cjs --only=all --checks=all
 
 > 本轮结论：4 项使用反馈的功能行为均已在打包产物上独立复现并通过；失败项 0；未覆盖项与取证限制见 13.4，`src/**` 的 2 条低级别发现与 2 条口径观察见 13.5，均只报告未修改。
 
+## 十四、第六轮（task-27）：SFTP 上传同名文件三选项与终端键盘输入验证
+
+- **验证人**：verifier5（独立验证；写入范围仅 `scripts/**`，未修改任何 `src/**`，未执行任何 git 操作）
+- **时间**：2026-11-23 10:55–11:25（Asia/Shanghai）
+- **背景**：task-26 改了 SFTP 上传契约，同时用户报过「终端里空格打不出来」，而 e2e 此前一直用 `window.api.terminal.write` 直写、键盘链路完全没覆盖。本轮独立验证两块的**已冻结契约**与**真实交互路径**：
+  1. `window.api.sftp.upload(sftpId, remoteDir, conflictAction?)` / `uploadPaths(dto)` 返回 `SftpUploadResultVO { uploaded（**远程绝对路径**）; conflicts; backups }`；`conflictAction?: 'overwrite' | 'backup'`；**不传时绝不覆盖**（同名文件进 `conflicts`，界面弹「文件已存在」三选一：取消 / 覆盖 / 备份后上传；备份名 =「原名.日期」，同日重复 `-2`）。
+  2. 本会话存在**匹配断点记录**（localPath 一致且远端长度 = 断点字节数）时**直接续传、不进 conflicts**。
+  3. 终端键盘路径要用 CDP 真实按键覆盖，断言 SSH 测试服务端**收到的字节**与终端回显一致（尤其空格）。
+
+### 14.1 本轮脚本改动（仅 `scripts/**`）
+
+| 文件 | 改动 |
+| --- | --- |
+| `scripts/verify-sftp.cjs` | 适配新契约：`upload` / `uploadPaths` 的返回值断言由「文件名」改为「**远程绝对路径**」；新增同名契约用例 **9 项**（缺省不覆盖只进 `conflicts`、远端内容不变、显式 `overwrite` 才覆盖、`backup` 改名「原名.日期」、备份内容为旧内容、新文件为新内容、同日重复备份顺延 `-2`）；补 `backupSuffixOf()` 日期后缀助手与文件头说明 |
+| `scripts/verify-resume.cjs` | 适配新契约：456/590 行的断言改为绝对路径；415 行附近「预置 0 字节同名文件」的首次上传**显式传 `overwrite`**（模拟远端遗留半成品，本意就是覆盖重写）；断点吻合的重试**新增**「不进 conflicts」断言；「成功后重复上传」显式 `overwrite`，并**新增**「不传 `conflictAction` → 返回 conflicts 且远端内容不变、0 写入 0 进度」断言；另补 **3.b 故障注入**（写全拒 → 备份后上传失败现场）；补假 SFTP 服务端的 **RENAME** 处理器（原先缺失，ssh2 对未注册请求回 `OP_UNSUPPORTED`，备份路径在该脚本里不可达）。新增 **8 项** |
+| `scripts/e2e-smoke.cjs` | `connectCdp` 新增 `typeKey`（keyDown 带 text + keyUp）/ `insertText` / `dropFiles`（`Input.dispatchDragEvent` 三连）；测试服务端 shell 通道新增**原始字节留档**（`shellObserved`）；页面助手新增 `activateSftpTab()`；新增本地临时目录统一清理（`EXTRA_TEMP_DIRS`）；新增 **12.17 终端真实键盘输入（14 项）** 与 **12.18 上传同名冲突三选项（38 项）**，合计 **52 项** |
+| `scripts/probe-key-input.cjs` | **新增**（开发辅助，不参与 `npm run verify`）：在仓库自带 xterm 上对比三种按键注入口径，回答「keyDown 要不要再补 char」；见 14.2 D |
+| `scripts/verify-report.md` | 本节（历史第一至十三节未做任何删改） |
+
+### 14.2 用例与实测数值
+
+**A. 同名文件契约（verify-sftp +9 项 → 40 项；verify-resume +8 项 → 38 项，均在真实 SSH/SFTP 协议上跑 `src/main/sftp.ts`）**
+
+| 断言 | 实测 |
+| --- | --- |
+| 上传返回**远程绝对路径** | `upload` → `/home/upload-me.txt`；`uploadPaths` → `/home/big-upload.bin`；多文件 → `/home/multi-1.bin、/home/multi-2.bin` |
+| 无同名文件时不产生冲突 / 备份 | `conflicts=[]`、`backups=[]` |
+| **缺省 `conflictAction` 绝不覆盖** | `uploaded=[]`、`conflicts=[{name:'upload-me.txt', remotePath:'/home/upload-me.txt', localPath:<本地绝对路径>}]`；远端仍是旧内容 |
+| 断点已清除时缺省再传 | `conflicts=1`、远端逐字节不变、`observed.writtenBytes=0`、进度 **0 条** |
+| 显式 `overwrite` | `uploaded=['/home/upload-me.txt']`、`conflicts=[]`、远端内容变为新内容 |
+| `backup` 改名规则 | `/home/upload-me.txt.20261123`（yyyyMMdd）；同日第二次备份 `/home/upload-me.txt.20261123-2` |
+| 备份内容语义 | 备份里是**被替换前**的旧内容，原名位置是本次上传的新内容 |
+| **断点吻合直接续传** | 中断在 262144 字节后重试：`conflicts=[]`（未被当冲突拦下）、只发送剩余 786432 字节、首条进度 `resumed=true` |
+
+**B. 终端真实键盘输入（e2e 12.17，14 项）**
+
+| 断言 | 实测 |
+| --- | --- |
+| 按键链路 | CDP `Input.dispatchKeyEvent`（keyDown 带 text + keyUp）→ xterm keydown → onData → IPC → SSH → 服务端 |
+| **`echo a b` 原样到达服务端** | 服务端累计字节新增 `"echo a b"`（8 字节，**含 2 个空格**，未出现丢空格的 `echoab`） |
+| 终端回显与服务端字节一致 | 屏幕出现 `echo a b`；输入前缓冲区里没有该文本（回显只能来自本次按键） |
+| 真实回车 | 新增字节恰好 `"\r"`（一个 CR，无重复） |
+| **Shift+大写组合** | `modifiers=8`（Shift）+ `KeyZ` → 服务端收到 `"Z"`；回显落在回车后的行首，该行实测 `「Z             echo a b」` |
+| 中文上屏（等价输入法） | `Input.insertText('中文上屏')` → 服务端逐字节收到 `"中文上屏"`（无乱码）且回显出现 |
+
+**C. 上传同名冲突三选项（e2e 12.18，38 项）**
+
+| 路径 | 实测 |
+| --- | --- |
+| 上传入口 | CDP `Input.dispatchDragEvent`（dragEnter → dragOver → drop）注入指向真实临时文件的拖拽；`webUtils.getPathForFile` 取到绝对路径，走产品真实 `onDrop → uploadPaths`（不是页面直调 IPC） |
+| 首次上传 | 远端出现 `conflict-cancel.txt` 且内容正确（证明注入链路可用） |
+| **弹窗** | 标题「文件已存在」；按钮 `取消、备份后上传、覆盖` 三个齐全；列出同名文件名；**默认聚焦「取消」**（回车不会直接覆盖） |
+| **取消** | 远端内容仍是旧内容（新内容未上传）；本批无其它文件时提示条 `1 个同名文件未上传`；混批（1 新 + 1 冲突）时提示条先 `已上传 1 个文件，1 个同名文件待处理`，取消后 `已上传 1 个，1 个同名文件未处理` |
+| **覆盖** | 远端内容变为本地新内容；提示条含「已覆盖」 |
+| **备份后上传** | 面板出现 `conflict-backup.txt.20261123`（后缀实测为当天 yyyyMMdd）；备份内容 = 旧内容 `备份前-旧内容`；主文件 = `备份后-新内容`；提示条 `已上传 1 个文件，已备份 1 个同名文件（如 conflict-backup.txt.20261123）` |
+| **同日重复备份** | 第三次上传后出现 `conflict-backup.txt.20261123-2`，内容是上一版 `备份后-新内容`，主文件为 `备份后-第三次内容` |
+| 混批语义 | 同一批里的新文件照常上传（不受同名文件影响），同名文件进 `conflicts` |
+
+**D. 按键注入口径探针（`scripts/probe-key-input.cjs`，退出码 0）**
+
+任务书写的是「keyDown 带 text + char + keyUp」。本轮先用探针在**仓库自带的 xterm** 上核对口径（`node scripts/probe-key-input.cjs`，探针自动写临时页面 + 隐藏 Electron 窗口 + CDP 注入）：
+
+| 口径 | xterm 实际收到 |
+| --- | --- |
+| A：`keyDown(text)` + `keyUp`（e / 空格 / Shift+Z / 回车） | `"e Z\r"` —— **逐字节正确** |
+| B：`keyDown(text)` + `char` + `keyUp`（同样四键） | `"ee  ZZ\r\r"` —— **每个字符发了两遍**（xterm 的 keydown 与 keypress 各发一次） |
+| C：`Input.insertText('中文上屏')` | `"中文上屏"` |
+
+结论：e2e 真实按键采用 **A 口径**（与 Puppeteer `keyboard.press` 一致），中文上屏用 C；**不补 `char`**，否则产品会被误判成「重复输入」。这是口径差异，不是产品缺陷。
+
+### 14.3 复跑结果（串行，全程独占 127.0.0.1:2222 / 9333 / 2323 / 9455）
+
+| 步骤 | 命令 | 结果 |
+| --- | --- | --- |
+| 基线 7 脚本 | `npm run verify` | **8 + 27 + 17 + 40 + 31 + 38 + 10 = 171 项通过，失败 0，退出码 0**（`verify:sftp` 31→**40**，`verify:resume` 30→**38**，其余脚本项数不变） |
+| 打包 | `npm run build:unpack` | `typecheck:node` / `typecheck:web` / `electron-vite build` / `electron-builder --dir` / `scripts/fix-dist.cjs` 全部退出码 0（fix-dist 报「完整性标签已重置为 Medium」「校验通过」），e2e 跑的就是该产物 |
+| 端到端 | `node scripts/e2e-smoke.cjs` | **283 项通过，失败 0，退出码 0**；基线 231 项**逐条保留**（对比两次日志：新增 52 项，其余 231 项仅 id/耗时等内容长度随运行变化） |
+| 界面取证 | `node scripts/ui-shot.cjs --only=all --checks=all`（`E2E_ELECTRON_BIN` → `%TEMP%\ui-shot-electron\electron.exe`） | **18 张截图 + 3 项检查（dpr / drag / contrast）全部完成，退出码 0**；drag 检查 `pathResolved=true`、`pathMatchesLocal=true`、`remoteRowVisible=true`、远端节点 `262287` 字节 `matchesLocal=true` |
+
+新增断言失败一律非零退出（本轮实证）：
+- 第 1 次运行在第 12.17 的「大写回显位置」断言失败（我误以为 `\r` 后 Z 会覆盖到 `echo a b` 的同一行行首，实际前一用例的 `\n` 已把光标留在下一行）→ `[失败]` + 退出码 **1**；
+- 第 2 次运行在第 12.18 的「取消提示条」断言失败（产品在「本批无上传成功」时用「未上传」而非「未处理」）→ `[失败]` + 退出码 **1**；
+- 第 3 次全绿 283 项、退出码 0。
+
+关键证据（截取）：
+- `[通过] 真实按键逐字节送达 SSH 服务端（收到 "echo a b"）`
+- `[通过] 服务端收到的 8 个字节里有 2 个空格，空格没有被吞掉（收到 "echo a b"）`
+- `[通过] 大写 Z 落在回车后的行首，回显与服务端字节一致（该行「Z             echo a b」）`
+- `[通过] 中文上屏文本逐字节送达远端且无乱码（收到 "中文上屏"）`
+- `[通过] 弹窗三选项齐全（取消、备份后上传、覆盖）`
+- `[通过] 取消后远端内容不变（仍是旧内容，没有被新内容覆盖）`
+- `[通过] 备份文件保留的是被替换前的旧内容（conflict-backup.txt.20261123）`
+- `[通过] 同日重复备份顺延为 -2（实际 conflict-backup.txt.20261123-2）`
+- `[通过] 断点记录与远端长度吻合时直接续传，未被当作同名冲突拦下（conflicts 为空）`
+- `[通过] 缺省路径没有写入任何字节也没有进度上报（写入 0 字节，进度 0 条）`
+
+### 14.4 未覆盖项与取证限制
+
+| 项 | 原因 |
+| --- | --- |
+| 工具栏「上传」按钮的**原生文件选择框**路径（`dialog.showOpenDialog`） | 原生模态框 CDP 无法确认/关闭；e2e 的上传冲突流程走拖拽注入，选择框入口在 `verify-sftp` 用 dialog 桩覆盖（含 `conflictAction` 透传），e2e 未重复覆盖 |
+| 「断点续传」与「同名冲突」在 e2e 内的组合 | e2e 无故障注入能力，无法制造中断；该组合已由 `verify-resume` 在真实协议上覆盖（续传不进 `conflicts`） |
+| 同名文件数 > 5 时弹窗的省略行（`等 N 个文件`） | 需一次拖入 6 个以上同名文件，本轮未构造（源码 `CONFLICT_PREVIEW = 5`） |
+| 备份名 `-3` 及以后、跨天日期切换、中文/特殊字符文件名的备份名 | 只实测到当天第二次备份 `-2`；跨天与特殊文件名未构造 |
+| macOS / Linux 打包产物 | 本机仅 Windows（`dist/win-unpacked` 与开发态 Electron 38） |
+| xterm 的 `keypress` 分支 | CDP `keyDown(text)` 不合成 `keypress`（见 14.2 D），该分支在自动化里不可达；产品侧无自有代码，风险由 xterm 承担 |
+
+### 14.5 发现（`src/**` 只报告、未修改）
+
+| 级别 | 发现 | 位置 | 证据与建议 |
+| --- | --- | --- | --- |
+| 低（数据可见性） | 「备份后上传」在上传写入失败时**不回滚改名**：旧内容只剩「原名.日期」备份可寻，原路径被截断成 **0 字节空文件** | `src/main/sftp.ts:385-399`（backup 分支）、`434-444`（backupRemote）、`469`（truncateRemote） | `verify-resume` 3.b 以 `fault.writeRejectFrom = 0` 注入写全失败：抛错不假装成功 ✓；备份 `/home/upload.bin.<yyyyMMdd>` 与本地文件逐字节一致 ✓（数据没丢）；但 `/home/upload.bin` 实测 **0 字节** ✗。建议改成「先写临时名、成功后 rename 覆盖」，或写失败时把备份改回原名 |
+| 低（文案口径，非缺陷） | 冲突取消后的提示条按「本批是否已有文件上传成功」分叉：有 → `已上传 x 个，y 个同名文件未处理`；无 → `y 个同名文件未上传` | `src/renderer/src/components/SftpPanel.tsx:668-678` | 两条分支本轮都已覆盖（12.18.1 / 12.18.5）；提醒后续用例不要只按「未处理」一种文案断言（本轮第 2 次运行即因此误判） |
+| 观察（静态阅读，未截图取证） | 冲突弹窗预览只列前 5 个文件名，超出时追加的行显示的是**总数**：`等 {conflicts.length} 个文件` | `src/renderer/src/components/SftpPanel.tsx:317-322` | 例如共 8 个冲突时会显示 5 个名字 + 「等 8 个文件」，读起来像「还有 8 个」，建议改成剩余数或总数口径统一；本轮未构造 >5 冲突场景，故只作静态观察 |
+| 观察（script 侧，非 src 问题） | `scripts/verify-resume.cjs` 的假 SFTP 服务端原先没有 `RENAME` 处理器，ssh2 对未注册请求回 `OP_UNSUPPORTED`，导致「备份后上传」在该脚本里此前根本走不到 | `scripts/verify-resume.cjs` | 本轮补上 RENAME（与 `verify-sftp` 的服务端一致）后，备份命名与失败现场才可取证；提示其它假服务端也要补齐用到的操作码 |
+
+### 14.6 本轮复现指引
+
+```powershell
+cd <repo>
+
+# 0) 确认没有残留进程占端口（2222 / 9333 / 2323 / 9455）
+#    注意：D:\application\EasySSH\EasySSH.exe 是独立安装版（用户正在运行的实例），不占上述端口，本轮未清理
+
+# 1) 基线 7 脚本（串行，勿并发，全部占用 127.0.0.1:2222）
+npm run verify        # 期望：8 + 27 + 17 + 40 + 31 + 38 + 10 = 171 项，退出码 0
+
+# 2) 打包（e2e 优先跑 dist/win-unpacked，必须先打包再跑 e2e）
+npm run build:unpack
+
+# 3) 端到端（真实 Electron + CDP 驱动 UI，含真实按键 / 真实拖拽注入）
+node scripts/e2e-smoke.cjs   # 期望：全部通过，共 283 项，退出码 0
+
+# 4) 界面取证（开发态需 out/ 已构建；E2E_ELECTRON_BIN 指向 %TEMP% 副本）
+$env:E2E_ELECTRON_BIN="$env:TEMP\ui-shot-electron\electron.exe"
+node scripts/ui-shot.cjs --only=all --checks=all
+# 期望：18 张截图 + 3 项检查（dpr / drag / contrast），退出码 0
+
+# 5) 按键注入口径探针（可选，验证「不要补 char」这一结论）
+node scripts/probe-key-input.cjs   # 期望：A 口径 "e Z\r"、B 口径双发、C 口径 "中文上屏"
+```
+
+> 本轮结论：同名文件契约（缺省不覆盖 / overwrite / backup 命名 / 断点续传不进冲突）与终端真实键盘输入（含空格、大写组合、中文上屏）均已在打包产物与真实 SSH/SFTP 协议上独立复现并通过；失败项 0；1 条低级数据可见性发现、1 条文案口径与 2 条静态观察见 14.5，均只报告未修改。
+
 

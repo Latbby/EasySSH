@@ -10,6 +10,8 @@
  *   3. 新建目录、重命名（含目录搬迁）、删除文件与删除目录
  *   4. 上传与下载的内容完整性
  *   5. 终端与 SFTP 共享同一条底层连接，且引用计数正确（关掉一个通道不会影响另一个）
+ *   6. 同名文件上传契约：缺省绝不覆盖（只进 conflicts）、显式 overwrite 才覆盖、
+ *      backup 把旧文件改名为「原名.日期」且同日重复备份顺延 -2
  */
 const { Server, utils } = require('ssh2')
 const fs = require('fs')
@@ -413,6 +415,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/**
+ * 备份文件名使用的日期后缀，与 src/main/sftp.ts 的 backupDateSuffix 保持同一种格式。
+ * @param {Date} date 当前时间
+ * @returns {string} yyyyMMdd 形式的日期串
+ */
+function backupSuffixOf(date) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`
+}
+
 async function main() {
   const server = await startServer()
   console.log(`[信息] 内存 SFTP 服务端已启动 127.0.0.1:${SSH_PORT}`)
@@ -473,8 +485,15 @@ async function main() {
   const uploadSource = path.join(DATA_DIR, 'upload-me.txt')
   fs.writeFileSync(uploadSource, 'uploaded-content-中文', 'utf8')
   dialogBehavior.openPaths = [uploadSource]
-  const uploaded = await manager.upload(session.sftpId, HOME)
-  assert(uploaded.length === 1 && uploaded[0] === 'upload-me.txt', '上传返回文件名')
+  const uploadResult = await manager.upload(session.sftpId, HOME)
+  assert(
+    uploadResult.uploaded.length === 1 && uploadResult.uploaded[0] === `${HOME}/upload-me.txt`,
+    `上传返回远程绝对路径（新契约，实际 ${uploadResult.uploaded[0]}）`
+  )
+  assert(
+    uploadResult.conflicts.length === 0 && uploadResult.backups.length === 0,
+    '目标目录没有同名文件时不产生冲突与备份'
+  )
   assert(
     memfs.get(`${HOME}/upload-me.txt`)?.content.toString('utf8') === 'uploaded-content-中文',
     '上传内容完整且中文无乱码'
@@ -483,6 +502,64 @@ async function main() {
   assert(
     (await manager.list(session.sftpId, HOME)).some((item) => item.name === 'upload-me.txt'),
     '上传后列表中可见新文件'
+  )
+
+  // 5.1 同名文件缺省处理：绝不覆盖，只把冲突交回界面
+  fs.writeFileSync(uploadSource, 'second-content-第二次', 'utf8')
+  dialogBehavior.openPaths = [uploadSource]
+  const conflictResult = await manager.upload(session.sftpId, HOME)
+  assert(
+    conflictResult.uploaded.length === 0 &&
+      conflictResult.conflicts.length === 1 &&
+      conflictResult.conflicts[0].name === 'upload-me.txt' &&
+      conflictResult.conflicts[0].remotePath === `${HOME}/upload-me.txt` &&
+      conflictResult.conflicts[0].localPath === uploadSource,
+    'upload 缺省 conflictAction 时同名文件只进 conflicts 且不上传'
+  )
+  assert(
+    memfs.get(`${HOME}/upload-me.txt`)?.content.toString('utf8') === 'uploaded-content-中文',
+    '缺省路径绝不覆盖：远端仍是旧内容'
+  )
+
+  // 5.2 显式 overwrite 才覆盖
+  dialogBehavior.openPaths = [uploadSource]
+  const overwriteResult = await manager.upload(session.sftpId, HOME, 'overwrite')
+  assert(
+    overwriteResult.uploaded.length === 1 &&
+      overwriteResult.uploaded[0] === `${HOME}/upload-me.txt` &&
+      overwriteResult.conflicts.length === 0,
+    '显式 conflictAction=overwrite 时直接覆盖并返回远程绝对路径'
+  )
+  assert(
+    memfs.get(`${HOME}/upload-me.txt`)?.content.toString('utf8') === 'second-content-第二次',
+    '覆盖后远端内容变为新文件内容'
+  )
+
+  // 5.3 backup：旧文件改名为「原名.日期」，同日重复备份顺延 -2
+  fs.writeFileSync(uploadSource, 'third-content-第三次', 'utf8')
+  dialogBehavior.openPaths = [uploadSource]
+  const backupSuffix = backupSuffixOf(new Date())
+  const backupFirst = await manager.upload(session.sftpId, HOME, 'backup')
+  assert(
+    backupFirst.backups.length === 1 &&
+      backupFirst.backups[0].to === `${HOME}/upload-me.txt.${backupSuffix}` &&
+      backupFirst.backups[0].name === `upload-me.txt.${backupSuffix}`,
+    `backup 模式把旧文件改名为「原名.日期」（${backupFirst.backups[0]?.to}）`
+  )
+  assert(
+    memfs.get(`${HOME}/upload-me.txt.${backupSuffix}`)?.content.toString('utf8') ===
+      'second-content-第二次',
+    '备份文件保留的是被替换前的旧内容'
+  )
+  assert(
+    memfs.get(`${HOME}/upload-me.txt`)?.content.toString('utf8') === 'third-content-第三次',
+    '备份后上传写入的是新内容'
+  )
+  const backupSecond = await manager.upload(session.sftpId, HOME, 'backup')
+  assert(
+    backupSecond.backups.length === 1 &&
+      backupSecond.backups[0].to === `${HOME}/upload-me.txt.${backupSuffix}-2`,
+    `同日重复备份顺延为 -2（${backupSecond.backups[0]?.to}）`
   )
 
   // 6. 下载：dialog 桩返回本地保存路径，内容需与远端一致
@@ -545,14 +622,14 @@ async function main() {
   const bigContent = Buffer.alloc(300 * 1024)
   for (let i = 0; i < bigContent.length; i += 1) bigContent[i] = i % 251
   fs.writeFileSync(bigSource, bigContent)
-  const uploadedNames = await progressManager.uploadPaths({
+  const uploadedResult = await progressManager.uploadPaths({
     sftpId: progressSession.sftpId,
     remoteDir: HOME,
     localPaths: [bigSource]
   })
   assert(
-    uploadedNames.length === 1 && uploadedNames[0] === 'big-upload.bin',
-    'uploadPaths 返回上传文件名（拖拽上传底层入口）'
+    uploadedResult.uploaded.length === 1 && uploadedResult.uploaded[0] === `${HOME}/big-upload.bin`,
+    `uploadPaths 返回远程绝对路径（拖拽上传底层入口，实际 ${uploadedResult.uploaded[0]}）`
   )
   const remoteBig = memfs.get(`${HOME}/big-upload.bin`)
   assert(

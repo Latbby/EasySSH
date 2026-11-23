@@ -10,6 +10,8 @@
  *   4. 下载中断后重试：`.part` 已下载部分被复用，服务端读取偏移从断点开始，最终逐字节一致
  *   5. `.part` 已完整或比远端更大时判定为脏数据，按从头下载处理
  *   6. 多文件上传逐个进行、进度按文件顺序上报，range 单调不减
+ *   7. 同名文件上传契约：断点吻合时直接续传（不进 conflicts）；断点已清除时缺省绝不覆盖
+ *      （只返回 conflicts 且远端不变），显式 overwrite 才从头重传
  *
  * 说明：本脚本占用 127.0.0.1:2222 起一个内存 SFTP 服务，请与其它验证脚本串行执行。
  */
@@ -277,6 +279,21 @@ function serveSftp(sftp) {
     sftp.attrs(reqid, attrsOf(node))
   }
 
+  // 备份用例（同名文件改名成「原名.日期」）需要改名能力；ssh2 服务端未注册的请求会回
+  // OP_UNSUPPORTED，缺了这个处理器备份路径根本走不通
+  sftp.on('RENAME', (reqid, oldPath, newPath) => {
+    const from = normalize(oldPath)
+    const to = normalize(newPath)
+    if (!memfs.has(from)) return sftp.status(reqid, STATUS.NO_SUCH_FILE)
+    for (const [fullPath, node] of [...memfs]) {
+      if (fullPath === from || fullPath.startsWith(`${from}/`)) {
+        memfs.delete(fullPath)
+        memfs.set(to + fullPath.slice(from.length), node)
+      }
+    }
+    sftp.status(reqid, STATUS.OK)
+  })
+
   sftp.on('SETSTAT', (reqid) => sftp.status(reqid, STATUS.OK))
   sftp.on('FSETSTAT', (reqid) => sftp.status(reqid, STATUS.OK))
   sftp.on('EXTENDED', (reqid) => sftp.status(reqid, STATUS.FAILURE))
@@ -412,13 +429,20 @@ async function main() {
   const uploadContent = crypto.randomBytes(uploadSize)
   const localUpload = path.join(WORK_DIR, 'upload.bin')
   fs.writeFileSync(localUpload, uploadContent)
+  // 预置一个 0 字节同名文件：模拟「远端已有上次留下的半成品」。
+  // 新契约下同名文件必须显式给出处理方式，这里按续传本意用 overwrite（本次从 0 重新写起）
   memfs.set(`${HOME}/upload.bin`, { type: 'file', content: Buffer.alloc(0) })
 
   fault.writeRejectFrom = UPLOAD_FAULT_AT
   let firstError = null
   try {
     await withTimeout(
-      manager.uploadPaths({ sftpId, remoteDir: HOME, localPaths: [localUpload] }),
+      manager.uploadPaths({
+        sftpId,
+        remoteDir: HOME,
+        localPaths: [localUpload],
+        conflictAction: 'overwrite'
+      }),
       '第一次上传（预期中断）'
     )
   } catch (err) {
@@ -453,7 +477,14 @@ async function main() {
     manager.uploadPaths({ sftpId, remoteDir: HOME, localPaths: [localUpload] }),
     '断点续传上传'
   )
-  assert(uploaded.length === 1 && uploaded[0] === 'upload.bin', '续传上传返回文件名')
+  assert(
+    uploaded.uploaded.length === 1 && uploaded.uploaded[0] === `${HOME}/upload.bin`,
+    `续传上传返回远程绝对路径（实际 ${uploaded.uploaded[0]}）`
+  )
+  assert(
+    uploaded.conflicts.length === 0 && uploaded.backups.length === 0,
+    '断点记录与远端长度吻合时直接续传，未被当作同名冲突拦下（conflicts 为空）'
+  )
   const remoteAfterResume = memfs.get(`${HOME}/upload.bin`).content
   assert(
     remoteAfterResume.length === uploadSize && remoteAfterResume.equals(uploadContent),
@@ -487,12 +518,40 @@ async function main() {
 
   // -------------------------------------------------------------------------
   // 3. 上传成功后断点被清除：再次上传从头开始
+  //    新契约：缺省 conflictAction 时同名文件绝不覆盖，只返回 conflicts 且远端内容不变；
+  //    要覆盖必须显式传 overwrite
   // -------------------------------------------------------------------------
   progress.length = 0
   resetObserved()
-  await withTimeout(
+  const conflictAfterDone = await withTimeout(
     manager.uploadPaths({ sftpId, remoteDir: HOME, localPaths: [localUpload] }),
-    '重复上传同一文件'
+    '传完后缺省处理方式再传一次'
+  )
+  assert(
+    conflictAfterDone.uploaded.length === 0 &&
+      conflictAfterDone.conflicts.length === 1 &&
+      conflictAfterDone.conflicts[0].remotePath === `${HOME}/upload.bin`,
+    '断点已清除时同名文件进入 conflicts 且不上传（缺省 conflictAction 不覆盖）'
+  )
+  assert(
+    memfs.get(`${HOME}/upload.bin`).content.equals(uploadContent),
+    '缺省路径下远端内容保持不变（没有被截断或改写）'
+  )
+  assert(
+    observed.writtenBytes === 0 && progress.length === 0,
+    `缺省路径没有写入任何字节也没有进度上报（写入 ${observed.writtenBytes} 字节，进度 ${progress.length} 条）`
+  )
+
+  progress.length = 0
+  resetObserved()
+  await withTimeout(
+    manager.uploadPaths({
+      sftpId,
+      remoteDir: HOME,
+      localPaths: [localUpload],
+      conflictAction: 'overwrite'
+    }),
+    '重复上传同一文件（显式覆盖）'
   )
   assert(
     progress[0].resumed === undefined && progress[0].transferred < uploadSize,
@@ -502,6 +561,40 @@ async function main() {
   assert(
     memfs.get(`${HOME}/upload.bin`).content.equals(uploadContent),
     '重传后远端内容仍与本地一致（先截断再写，没有尾部残留）'
+  )
+
+  // -------------------------------------------------------------------------
+  // 3.b 备份后上传在中途失败时的远端现场（故障注入取证）
+  //     先把旧文件改名成备份、再写新文件；写入失败时**必须回滚**：
+  //     清掉半成品并把备份改名回原路径，保证原路径仍是失败前的完整旧内容。
+  // -------------------------------------------------------------------------
+  progress.length = 0
+  resetObserved()
+  fault.writeRejectFrom = 0
+  let backupFailure = null
+  try {
+    await withTimeout(
+      manager.uploadPaths({
+        sftpId,
+        remoteDir: HOME,
+        localPaths: [localUpload],
+        conflictAction: 'backup'
+      }),
+      '备份后上传（预期中断）'
+    )
+  } catch (err) {
+    backupFailure = err
+  }
+  fault.writeRejectFrom = null
+  assert(Boolean(backupFailure), '备份后上传写入失败时以异常返回，不会假装成功')
+  const backupKeys = [...memfs.keys()].filter((key) => key.startsWith(`${HOME}/upload.bin.`))
+  assert(
+    backupKeys.length === 0,
+    `回滚后没有残留的「原名.日期」备份（实际 ${backupKeys.join('、') || '无'}）`
+  )
+  assert(
+    memfs.get(`${HOME}/upload.bin`).content.equals(uploadContent),
+    `回滚后原路径仍是失败前的完整旧内容（实际 ${memfs.get(`${HOME}/upload.bin`).content.length} 字节）`
   )
 
   // -------------------------------------------------------------------------
@@ -587,8 +680,10 @@ async function main() {
     '多文件上传'
   )
   assert(
-    multiNames.length === 2 && multiNames[0] === 'multi-1.bin' && multiNames[1] === 'multi-2.bin',
-    `多文件上传按入参顺序返回（${multiNames.join('、')}）`
+    multiNames.uploaded.length === 2 &&
+      multiNames.uploaded[0] === `${HOME}/multi-1.bin` &&
+      multiNames.uploaded[1] === `${HOME}/multi-2.bin`,
+    `多文件上传按入参顺序返回远程绝对路径（${multiNames.uploaded.join('、')}）`
   )
   assert(
     files.every((item, index) =>
