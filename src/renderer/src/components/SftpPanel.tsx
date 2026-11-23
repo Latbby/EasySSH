@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import type { SftpEntryVO, SftpTransferVO } from '@shared/types'
+import type {
+  SftpConflictAction,
+  SftpEntryVO,
+  SftpTransferVO,
+  SftpUploadConflictVO,
+  SftpUploadResultVO
+} from '@shared/types'
 import Icon from './Icon'
 import type { IconName } from './Icon'
+import { useFocusTrap } from '../useFocusTrap'
 import { toMessage } from '../utils'
 
 interface Props {
@@ -40,6 +47,12 @@ const OVERSCAN = 6
 
 /** 新建目录行占一行普通行高 */
 const NEWDIR_HEIGHT = ROW_HEIGHT
+
+/** 同名文件弹窗里最多逐条列出的文件名个数，其余用「等 N 个文件」概括（N 为未列出的剩余数量） */
+const CONFLICT_PREVIEW = 5
+
+/** 冲突文件清单样式：文字层级沿用 .modal-note，只补列表缩进与等宽文件名 */
+const CONFLICT_LIST_STYLE: CSSProperties = { paddingLeft: 18, fontFamily: 'var(--font-mono)' }
 
 /** 各行单元格共有样式，宽度相关属性再按列追加 */
 const BASE_CELL_STYLE: CSSProperties = { position: 'relative' }
@@ -209,6 +222,126 @@ function entryIcon(entry: SftpEntryVO): IconName {
 }
 
 /**
+ * 等待用户决定处理方式的同名文件。
+ * 记录首次上传的结果，用户点覆盖/备份后仍在这个目录里重试，取消时据此拼提示条。
+ */
+interface PendingConflict {
+  /** 本次上传的目标目录 */
+  remoteDir: string
+  /** 首次上传已完成的文件数 */
+  uploaded: number
+  /** 因同名未上传、等待询问的文件 */
+  conflicts: SftpUploadConflictVO[]
+}
+
+/** 同名文件弹窗入参 */
+interface ConflictDialogProps {
+  /** 因同名未上传的文件 */
+  conflicts: SftpUploadConflictVO[]
+  /** 取消：这些文件都不上传 */
+  onCancel(): void
+  /**
+   * 用户选定的处理方式，按它重试上传冲突文件
+   * @param action 覆盖或备份后上传
+   */
+  onResolve(action: SftpConflictAction): void
+}
+
+/**
+ * 同名文件处理弹窗：取消 / 覆盖 / 备份后上传。
+ * 只在命中同名冲突时挂载，因此焦点陷阱能拿到真实存在的弹窗容器；
+ * 交互约定与其它弹窗一致：Esc 与点遮罩都按取消处理，遮罩上拖选文字不会误关。
+ * @param props 见 ConflictDialogProps
+ * @returns 弹窗元素
+ */
+function ConflictDialog({
+  conflicts,
+  onCancel,
+  onResolve
+}: ConflictDialogProps): React.JSX.Element {
+  /** 弹窗容器：Esc 关闭与 Tab 循环交给焦点陷阱 */
+  const dialogRef = useRef<HTMLDivElement>(null)
+  /** 遮罩按下/松开标记：只有两次都落在遮罩本身才关闭 */
+  const pressOnMaskRef = useRef(false)
+  const releaseOnMaskRef = useRef(false)
+  /** 取消回调每次渲染都会换新，这里用 ref 固定最新一份 */
+  const cancelRef = useRef(onCancel)
+  useEffect(() => {
+    cancelRef.current = onCancel
+  }, [onCancel])
+  /**
+   * 传给焦点陷阱的稳定回调。
+   * 焦点陷阱以回调身份作为依赖，回调若每次渲染都换新就会被反复重装，
+   * 而重装时会把焦点还给上一次记录的焦点元素——用户刚 Tab 到「备份后上传」就会被拉回「取消」。
+   */
+  const handleEscape = useCallback(() => cancelRef.current(), [])
+
+  useFocusTrap(dialogRef, handleEscape)
+
+  return (
+    <div
+      className="modal-mask"
+      onMouseDown={(event) => {
+        pressOnMaskRef.current = event.target === event.currentTarget
+      }}
+      onMouseUp={(event) => {
+        releaseOnMaskRef.current = event.target === event.currentTarget
+      }}
+      onClick={(event) => {
+        const clickedMask =
+          pressOnMaskRef.current && releaseOnMaskRef.current && event.target === event.currentTarget
+        pressOnMaskRef.current = false
+        releaseOnMaskRef.current = false
+        if (clickedMask) onCancel()
+      }}
+    >
+      <div
+        className="modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sftp-conflict-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-head">
+          <h2 className="modal-title" id="sftp-conflict-title">
+            文件已存在
+          </h2>
+        </div>
+
+        <div className="modal-body">
+          <p className="modal-note">
+            目标目录中已存在同名文件，继续上传会替换远端文件内容。请选择处理方式：
+            覆盖会直接用本地文件替换远端文件；备份后上传会先把远端旧文件改名为「原名.日期」。
+          </p>
+          <ul className="modal-note" style={CONFLICT_LIST_STYLE}>
+            {conflicts.slice(0, CONFLICT_PREVIEW).map((item) => (
+              <li key={item.remotePath}>{item.name}</li>
+            ))}
+            {conflicts.length > CONFLICT_PREVIEW && (
+              <li>等 {conflicts.length - CONFLICT_PREVIEW} 个文件</li>
+            )}
+          </ul>
+        </div>
+
+        <div className="modal-foot">
+          {/* 默认聚焦「取消」：同名文件弹窗不应让回车直接触发覆盖 */}
+          <button type="button" onClick={onCancel} autoFocus>
+            取消
+          </button>
+          <button type="button" onClick={() => onResolve('backup')}>
+            备份后上传
+          </button>
+          <button type="button" className="primary-btn" onClick={() => onResolve('overwrite')}>
+            覆盖
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
  * SFTP 文件面板：浏览远程目录，支持上传、下载、重命名、删除、新建目录与远程编辑。
  * 交互约定：单击选中，目录单击即进入，文件单击只选中、双击才下载；
  * 选中后 Enter 打开、F5 刷新，上下键移动选中；
@@ -238,6 +371,8 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
   const [scrollTop, setScrollTop] = useState(0)
   /** 列表可视高度，由 ResizeObserver 维护 */
   const [viewportHeight, setViewportHeight] = useState(0)
+  /** 等待用户决定处理方式的同名文件，null 表示不显示冲突弹窗 */
+  const [pending, setPending] = useState<PendingConflict | null>(null)
 
   const pathInputRef = useRef<HTMLInputElement>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
@@ -252,6 +387,8 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
   const progressTimerRef = useRef<number | null>(null)
   /** 传输进度聚合明细，事件回调里读写，不进 state 避免每次进度事件都重建数组 */
   const transferRef = useRef<TransferAggregate | null>(null)
+  /** 冲突文件重试中标记：按钮被连点两次时只认第一次，避免同一批文件并发上传两遍 */
+  const resolvingRef = useRef(false)
 
   useEffect(() => {
     cwdRef.current = cwd
@@ -473,16 +610,39 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
     // 跳转成功时 input 已随 cwd 重渲染为新路径，失败时保持用户输入，两种情况下都无需回写
   }
 
-  /** 选择本地文件上传到当前目录 */
+  /**
+   * 处理上传结果：刷新目录、给出提示条，同名未上传的文件弹出询问弹窗。
+   * @param result 主进程返回的上传结果
+   * @param remoteDir 本次上传的目标目录，用户确认后仍在同一目录重试冲突文件
+   */
+  const applyUploadResult = async (
+    result: SftpUploadResultVO,
+    remoteDir: string
+  ): Promise<void> => {
+    const uploaded = result.uploaded.length
+    // 先刷新再提示：load 会清掉旧提示，提示放在刷新之后才不会被立刻抹掉
+    if (uploaded > 0) await load(remoteDir)
+    if (result.conflicts.length > 0) {
+      setPending({ remoteDir, uploaded, conflicts: result.conflicts })
+      setMessage(
+        uploaded > 0
+          ? `已上传 ${uploaded} 个文件，${result.conflicts.length} 个同名文件待处理`
+          : `${result.conflicts.length} 个同名文件待处理`
+      )
+      return
+    }
+    setMessage(uploaded > 0 ? `已上传 ${uploaded} 个文件` : '没有文件被上传')
+  }
+
+  /** 选择本地文件上传到当前目录；同名文件不覆盖，交由冲突弹窗询问用户 */
   const upload = async (): Promise<void> => {
     setBusy(true)
     setMessage(null)
     try {
-      const names = await window.api.sftp.upload(sftpId, cwd)
-      if (names.length) {
-        setMessage(`已上传 ${names.join('、')}`)
-        await load(cwd)
-      }
+      const result = await window.api.sftp.upload(sftpId, cwd)
+      // 用户在系统选择框里取消时保持静默，与原有行为一致
+      if (result.uploaded.length === 0 && result.conflicts.length === 0) return
+      await applyUploadResult(result, cwd)
     } catch (err) {
       setMessage(toMessage(err))
     } finally {
@@ -498,16 +658,62 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
     setBusy(true)
     setMessage(null)
     try {
-      const names = await window.api.sftp.uploadPaths({ sftpId, remoteDir: cwd, localPaths })
-      if (names.length) {
-        setMessage(`已上传 ${names.join('、')}`)
-        await load(cwd)
+      const result = await window.api.sftp.uploadPaths({ sftpId, remoteDir: cwd, localPaths })
+      await applyUploadResult(result, cwd)
+    } catch (err) {
+      setMessage(toMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 取消处理同名文件：这些文件不上传，只保留首次已传完的部分 */
+  const cancelConflicts = (): void => {
+    const task = pending
+    if (!task) return
+    setPending(null)
+    setMessage(
+      task.uploaded > 0
+        ? `已上传 ${task.uploaded} 个，${task.conflicts.length} 个同名文件未处理`
+        : `${task.conflicts.length} 个同名文件未上传`
+    )
+  }
+
+  /**
+   * 按用户选择的处理方式，只对冲突文件重试上传。
+   * @param action 同名文件处理方式：覆盖或备份后上传
+   */
+  const resolveConflicts = async (action: SftpConflictAction): Promise<void> => {
+    const task = pending
+    // 连点按钮时只认第一次，否则同一批文件会被并发上传，备份模式还会多出无用备份
+    if (!task || resolvingRef.current) return
+    resolvingRef.current = true
+    setPending(null)
+    setBusy(true)
+    setMessage(null)
+    try {
+      const result = await window.api.sftp.uploadPaths({
+        sftpId,
+        remoteDir: task.remoteDir,
+        localPaths: task.conflicts.map((item) => item.localPath),
+        conflictAction: action
+      })
+      // 先刷新再提示，理由同 applyUploadResult
+      await load(task.remoteDir)
+      const uploaded = task.uploaded + result.uploaded.length
+      if (action === 'backup' && result.backups.length > 0) {
+        setMessage(
+          `已上传 ${uploaded} 个文件，已备份 ${result.backups.length} 个同名文件（如 ${result.backups[0].name}）`
+        )
+      } else if (action === 'overwrite') {
+        setMessage(`已上传 ${uploaded} 个文件，已覆盖 ${result.uploaded.length} 个同名文件`)
       } else {
-        setMessage('没有文件被上传')
+        setMessage(`已上传 ${uploaded} 个文件`)
       }
     } catch (err) {
       setMessage(toMessage(err))
     } finally {
+      resolvingRef.current = false
       setBusy(false)
     }
   }
@@ -686,7 +892,8 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
    * @param event React 键盘事件
    */
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
-    if (renaming || creating) return
+    // 冲突弹窗打开时面板快捷键整体让位：Enter 只应作用于弹窗按钮，不能顺带去打开列表项
+    if (renaming || creating || pending) return
     if (event.key === 'F5') {
       event.preventDefault()
       void load(cwd)
@@ -1018,6 +1225,15 @@ function SftpPanel({ sftpId, home, active }: Props): React.JSX.Element {
       </div>
 
       {dropping && <div className="sftp-drop">松开鼠标上传到 {cwd}</div>}
+
+      {/* 同名文件询问弹窗：放在面板内，切走标签隐藏面板时弹窗一并隐藏 */}
+      {pending && (
+        <ConflictDialog
+          conflicts={pending.conflicts}
+          onCancel={cancelConflicts}
+          onResolve={(action) => void resolveConflicts(action)}
+        />
+      )}
     </div>
   )
 }

@@ -102,6 +102,9 @@ export interface OpenSftpDTO {
   inline?: SaveConnectionDTO
 }
 
+/** 同名远程文件的处理方式 */
+export type SftpConflictAction = 'overwrite' | 'backup'
+
 /** 上传指定本地文件入参，供拖拽上传使用（不弹系统选择框） */
 export interface SftpUploadPathsDTO {
   sftpId: string
@@ -109,6 +112,42 @@ export interface SftpUploadPathsDTO {
   remoteDir: string
   /** 本地文件绝对路径列表 */
   localPaths: string[]
+  /**
+   * 同名远程文件的处理方式，缺省不改动：同名文件不上传，在结果里列为 conflicts 交给界面询问。
+   * - overwrite：直接覆盖同名文件
+   * - backup：先把同名文件改名为「原名.日期」（同日重复备份自动加 -2、-3）再上传
+   */
+  conflictAction?: SftpConflictAction
+}
+
+/** 因同名而未上传、等待用户确认的文件 */
+export interface SftpUploadConflictVO {
+  /** 本地文件绝对路径，用户确认后据此重试上传 */
+  localPath: string
+  /** 远程目标绝对路径 */
+  remotePath: string
+  /** 文件名，供界面展示 */
+  name: string
+}
+
+/** 备份后上传时产生的备份记录 */
+export interface SftpBackupVO {
+  /** 原远程路径（已改名为备份） */
+  from: string
+  /** 备份后的远程路径 */
+  to: string
+  /** 文件名，供界面展示 */
+  name: string
+}
+
+/** 上传结果出参：已上传文件、等待确认的同名文件、以及产生的备份 */
+export interface SftpUploadResultVO {
+  /** 上传成功的远程文件绝对路径 */
+  uploaded: string[]
+  /** 因同名未上传的文件；conflictAction 有值时恒为空 */
+  conflicts: SftpUploadConflictVO[]
+  /** backup 模式下被改名的旧文件 */
+  backups: SftpBackupVO[]
 }
 
 /** 文件传输进度出参，主进程按块上报，供面板显示进度条 */
@@ -273,10 +312,17 @@ export interface SshClientApi {
     close(sftpId: string): void
     /** 列出远程目录内容 */
     list(sftpId: string, path: string): Promise<SftpEntryVO[]>
-    /** 弹出文件选择框上传到指定远程目录，返回上传成功的文件名；用户取消时为空数组 */
-    upload(sftpId: string, remoteDir: string): Promise<string[]>
-    /** 上传指定的本地文件（拖拽上传），返回上传成功的文件名 */
-    uploadPaths(dto: SftpUploadPathsDTO): Promise<string[]>
+    /**
+     * 弹出文件选择框上传到指定远程目录。
+     * 不传 conflictAction 时绝不覆盖：同名文件不上传，在结果的 conflicts 里返回交给界面询问。
+     */
+    upload(
+      sftpId: string,
+      remoteDir: string,
+      conflictAction?: SftpConflictAction
+    ): Promise<SftpUploadResultVO>
+    /** 上传指定的本地文件（拖拽上传）；conflictAction 缺省时同名文件进入 conflicts */
+    uploadPaths(dto: SftpUploadPathsDTO): Promise<SftpUploadResultVO>
     /** 弹出保存框下载远程文件，返回是否完成 */
     download(sftpId: string, remotePath: string): Promise<boolean>
     /** 新建远程目录 */

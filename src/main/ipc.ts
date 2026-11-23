@@ -13,7 +13,9 @@ import {
   type SessionSnapshotVO,
   type SftpEntryVO,
   type SftpTransferVO,
+  type SftpConflictAction,
   type SftpUploadPathsDTO,
+  type SftpUploadResultVO,
   type EditSessionVO
 } from '@shared/types'
 import {
@@ -190,11 +192,18 @@ export function registerIpcHandlers(): IpcHandle {
   ipcMain.handle(IPC.sftpList, (_event, sftpId: string, path: string): Promise<SftpEntryVO[]> =>
     sftp.list(sftpId, path)
   )
-  ipcMain.handle(IPC.sftpUpload, (_event, sftpId: string, remoteDir: string): Promise<string[]> =>
-    sftp.upload(sftpId, remoteDir)
+  ipcMain.handle(
+    IPC.sftpUpload,
+    (
+      _event,
+      sftpId: string,
+      remoteDir: string,
+      conflictAction?: SftpConflictAction
+    ): Promise<SftpUploadResultVO> => sftp.upload(sftpId, remoteDir, conflictAction)
   )
-  ipcMain.handle(IPC.sftpUploadPaths, (_event, dto: SftpUploadPathsDTO): Promise<string[]> =>
-    sftp.uploadPaths(dto)
+  ipcMain.handle(
+    IPC.sftpUploadPaths,
+    (_event, dto: SftpUploadPathsDTO): Promise<SftpUploadResultVO> => sftp.uploadPaths(dto)
   )
   ipcMain.handle(IPC.sftpDownload, (_event, sftpId: string, remotePath: string): Promise<boolean> =>
     sftp.download(sftpId, remotePath)

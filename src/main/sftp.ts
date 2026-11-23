@@ -6,10 +6,13 @@ import type { Writable } from 'stream'
 import type { FileEntry, SFTPWrapper, Stats } from 'ssh2'
 import type {
   OpenSftpVO,
+  SftpBackupVO,
+  SftpConflictAction,
   SftpEntryType,
   SftpEntryVO,
   SftpTransferVO,
-  SftpUploadPathsDTO
+  SftpUploadPathsDTO,
+  SftpUploadResultVO
 } from '@shared/types'
 import { POOL_CLOSED, type ResolvedSshConfig, type SshConnectionPool } from './ssh'
 import { toReadableError } from './errors'
@@ -20,6 +23,17 @@ interface SftpSession {
   /** 所属底层连接，释放时按它递减引用计数 */
   connectionId: string
   sftp: SFTPWrapper
+}
+
+/**
+ * 上传断点：某个远端目标已确认写入远端的字节数，以及这次上传用的本地文件。
+ * 带上本地文件是为了区分「同一个文件接着传」和「换了另一个同名文件」——后者必须重新询问用户。
+ */
+interface UploadCheckpoint {
+  /** 上传该目标时使用的本地文件绝对路径 */
+  localPath: string
+  /** 已确认写入远端的字节数 */
+  bytes: number
 }
 
 /**
@@ -109,6 +123,27 @@ function remoteFileSize(sftp: SFTPWrapper, remotePath: string): Promise<number> 
 }
 
 /**
+ * 判断远端路径是否已存在。
+ * 复用 {@link remoteFileSize} 的探测方式：取不到大小时按不存在处理，与后续按偏移写入的判断保持同一套语义。
+ * @param sftp SFTP 通道
+ * @param remotePath 远端绝对路径
+ * @returns 存在时返回 true
+ */
+async function remoteExists(sftp: SFTPWrapper, remotePath: string): Promise<boolean> {
+  return (await remoteFileSize(sftp, remotePath)) >= 0
+}
+
+/**
+ * 取备份文件名使用的本地日期后缀。
+ * @param date 当前时间
+ * @returns yyyyMMdd 形式的日期串，例如 20261123
+ */
+function backupDateSuffix(date: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`
+}
+
+/**
  * 以截断方式在远端创建空文件。
  * ssh2 的写流按 r+ 打开时要求目标已存在，所以首次上传（或断点作废重传）前先建出空文件，
  * 这样后续「按偏移写入」的语义与 fastPut 的 w 一致，不会把旧内容留在文件尾部。
@@ -183,10 +218,11 @@ export class SftpManager {
   private sessions = new Map<string, SftpSession>()
 
   /**
-   * 上传断点记录，key 为「会话 id|远端路径」，value 为该文件已确认写入远端的字节数。
-   * 只存在内存里：进程活着就能对中断的文件续传，重启后从头传，符合面板的会话语义。
+   * 上传断点记录，key 为「会话 id|远端路径」。
+   * 只存在内存里：进程活着就能对中断的文件续传，重启后从头传，符合面板的会话语义；
+   * 值里带着本地文件路径与已写入字节数，供同名文件的「续传还是询问」判断使用。
    */
-  private uploadOffsets = new Map<string, number>()
+  private uploadOffsets = new Map<string, UploadCheckpoint>()
 
   /**
    * @param pool 共享的连接池
@@ -311,35 +347,138 @@ export class SftpManager {
    * 弹出文件选择框，把选中的本地文件上传到指定远程目录，内部复用 {@link uploadPaths}。
    * @param sftpId SFTP 会话 id
    * @param remoteDir 目标远程目录
-   * @returns 上传成功的文件名列表；用户取消时为空数组
+   * @param conflictAction 同名远程文件的处理方式；缺省时不覆盖同名文件，只在结果 conflicts 里返回
+   * @returns 上传结果：已上传的远程路径、等待用户确认的同名文件与产生的备份
    */
-  async upload(sftpId: string, remoteDir: string): Promise<string[]> {
+  async upload(
+    sftpId: string,
+    remoteDir: string,
+    conflictAction?: SftpConflictAction
+  ): Promise<SftpUploadResultVO> {
     // 先校验会话，避免用户挑完文件才发现面板已经关闭
     this.require(sftpId)
     const picked = await dialog.showOpenDialog({
       title: '选择要上传的文件',
       properties: ['openFile', 'multiSelections']
     })
-    if (picked.canceled || picked.filePaths.length === 0) return []
+    if (picked.canceled || picked.filePaths.length === 0) {
+      return { uploaded: [], conflicts: [], backups: [] }
+    }
 
-    return this.uploadPaths({ sftpId, remoteDir, localPaths: picked.filePaths })
+    return this.uploadPaths({ sftpId, remoteDir, localPaths: picked.filePaths, conflictAction })
   }
 
   /**
    * 上传指定的本地文件列表，不弹系统选择框，供面板拖拽上传使用。
-   * @param dto 上传入参：会话 id、目标远程目录、本地文件绝对路径列表
-   * @returns 上传成功的文件名列表
+   * 目标目录已有同名文件时按 dto.conflictAction 处理：缺省绝不覆盖，只把该文件列进 conflicts 交给界面询问；
+   * 例外是本会话上次没传完的半成品（见 {@link canResume}），它直接续传，不再打扰用户。
+   * @param dto 上传入参：会话 id、目标远程目录、本地文件绝对路径列表、同名文件处理方式
+   * @returns 上传结果：已上传的远程路径、等待用户确认的同名文件与产生的备份
    */
-  async uploadPaths(dto: SftpUploadPathsDTO): Promise<string[]> {
+  async uploadPaths(dto: SftpUploadPathsDTO): Promise<SftpUploadResultVO> {
     const session = this.require(dto.sftpId)
-    const uploaded: string[] = []
+    const result: SftpUploadResultVO = { uploaded: [], conflicts: [], backups: [] }
     // 逐个上传而非并发，避免多个大文件抢占同一条通道导致进度来回跳
     for (const localPath of dto.localPaths) {
       const name = basename(localPath)
-      await this.putFile(session, joinRemote(dto.remoteDir, name), localPath, name)
-      uploaded.push(name)
+      const remotePath = joinRemote(dto.remoteDir, name)
+      /** 备份后上传时先记下本次备份，写入失败要靠它把旧内容还回原路径 */
+      let backup: SftpBackupVO | null = null
+      // 同名判定必须在写入之前：一旦开始写入，远端旧内容就已经被截断了
+      if (await remoteExists(session.sftp, remotePath)) {
+        // 本会话上次没传完的半成品：断点吻合时直接接着传，问用户「是否覆盖」只会让人困惑
+        if (!(await this.canResume(session, remotePath, localPath))) {
+          // 没给处理方式时只登记冲突，交由界面让用户选覆盖、备份还是取消
+          if (!dto.conflictAction) {
+            result.conflicts.push({ localPath, remotePath, name })
+            continue
+          }
+          // 备份后上传：先把旧文件改名留档，再照常写入新文件
+          if (dto.conflictAction === 'backup') {
+            const backupPath = await this.backupRemote(session, remotePath)
+            backup = { from: remotePath, to: backupPath, name: basename(backupPath) }
+          }
+        }
+      }
+      try {
+        await this.putFile(session, remotePath, localPath, name)
+      } catch (err) {
+        // 写入失败时原路径只剩半成品、旧内容只在备份里，必须先回滚再按原样抛错
+        if (backup) await this.rollbackBackup(session, backup, err)
+        throw err
+      }
+      if (backup) result.backups.push(backup)
+      result.uploaded.push(remotePath)
     }
-    return uploaded
+    return result
+  }
+
+  /**
+   * 备份后上传失败时的回滚：先删掉原路径上的半成品，再把备份改名回原路径。
+   * 半成品可能只写了半截、甚至还是 0 字节，删除本身就是尽力而为（失败忽略）；
+   * 回滚失败时不能盖掉原始上传错误，只把原因并进它的错误信息，用户至少能看到「上传失败」。
+   * @param session 目标 SFTP 会话
+   * @param backup 本次产生的备份记录
+   * @param cause 原始上传错误，回滚失败时把原因并入它的错误信息
+   */
+  private async rollbackBackup(
+    session: SftpSession,
+    backup: SftpBackupVO,
+    cause: unknown
+  ): Promise<void> {
+    // 原路径马上要变回旧文件，本次写入留下的断点不再代表远端状态，先清掉，
+    // 否则下次上传若旧文件长度恰好等于断点字节数，会被误判成可续传的半成品
+    this.uploadOffsets.delete(`${session.id}|${backup.from}`)
+    await new Promise<void>((resolve) => {
+      // 远端可能连文件都没建出来，unlink 失败一律忽略，不能因此跳过后面的改名
+      session.sftp.unlink(backup.from, () => resolve())
+    })
+    try {
+      await this.rename(session.id, backup.to, backup.from)
+    } catch (err) {
+      const reason = toReadableError(err, '回滚备份').message
+      if (cause instanceof Error) cause.message = `${cause.message}；回滚失败：${reason}`
+    }
+  }
+
+  /**
+   * 判断同名文件能否直接续传，而不是弹窗询问用户。
+   * 依据只有本会话的上传断点记录：记录里的本地文件与本次是同一个，且远端当前长度正好等于记录字节数，
+   * 才说明远端内容就是本应用上次没传完的半成品；没有记录（已传完或换过会话）、长度对不上
+   * （远端被别的程序改过）或换了本地文件，都必须按同名冲突交给用户决定。
+   * @param session 目标 SFTP 会话
+   * @param remotePath 远端绝对路径
+   * @param localPath 本地文件绝对路径
+   * @returns 可以直接续传时返回 true
+   */
+  private async canResume(
+    session: SftpSession,
+    remotePath: string,
+    localPath: string
+  ): Promise<boolean> {
+    const record = this.uploadOffsets.get(`${session.id}|${remotePath}`)
+    if (!record || record.localPath !== localPath) return false
+    return (await remoteFileSize(session.sftp, remotePath)) === record.bytes
+  }
+
+  /**
+   * 把同名旧文件改名成「原名.日期」备份。
+   * 复用 {@link rename} 的改名能力；备份名已被占用时依次尝试 -2、-3…，改名失败直接抛出，
+   * 由上传流程按原有方式报错，不做吞异常后的静默覆盖。
+   * @param session 目标 SFTP 会话
+   * @param remotePath 原远程路径
+   * @returns 备份后的远程路径
+   */
+  private async backupRemote(session: SftpSession, remotePath: string): Promise<string> {
+    const date = backupDateSuffix(new Date())
+    // 首次用「原名.日期」，同名备份已存在时从 -2 顺延，最多尝试 99 次，避免极端情况下无限循环
+    for (let index = 1; index <= 99; index += 1) {
+      const candidate = index === 1 ? `${remotePath}.${date}` : `${remotePath}.${date}-${index}`
+      if (await remoteExists(session.sftp, candidate)) continue
+      await this.rename(session.id, remotePath, candidate)
+      return candidate
+    }
+    throw new Error(`同名备份文件过多，无法备份：${remotePath}`)
   }
 
   /**
@@ -360,8 +499,8 @@ export class SftpManager {
     const { sftp } = session
     const total = statSync(localPath).size
     const key = `${session.id}|${remotePath}`
-    const record = this.uploadOffsets.get(key) ?? 0
-    let offset = Math.min(record, total)
+    const record = this.uploadOffsets.get(key)
+    let offset = record ? Math.min(record.bytes, total) : 0
     // 远端可能在两次上传之间被改动过（同名文件被替换等），长度对不上时按原偏移续写会写坏文件，改为重传
     if (offset > 0 && (await remoteFileSize(sftp, remotePath)) !== offset) offset = 0
     // r+ 要求目标已存在，首次上传（或断点作废）时先建出空文件
@@ -384,7 +523,7 @@ export class SftpManager {
         await writeChunk(writer, chunk as Buffer)
         written += (chunk as Buffer).length
         // 每写成功一块就刷新断点，连接或进程中断后能从最近一次成功写入处接着传
-        this.uploadOffsets.set(key, written)
+        this.uploadOffsets.set(key, { localPath, bytes: written })
         reporter.report(written, total, false)
       }
       if (failure) throw failure
